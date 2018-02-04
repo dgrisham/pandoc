@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 {-
-Copyright (C) 2006-2017 John MacFarlane <jgm@berkeley.edu>
+Copyright (C) 2006-2018 John MacFarlane <jgm@berkeley.edu>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -19,7 +19,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 -}
 {- |
    Module      : Text.Pandoc.Writers.JATS
-   Copyright   : Copyright (C) 2017 John MacFarlane
+   Copyright   : Copyright (C) 2017-2018 John MacFarlane
    License     : GNU GPL, version 2 or above
 
    Maintainer  : John MacFarlane <jgm@berkeley.edu>
@@ -159,6 +159,39 @@ listItemToJATS opts mbmarker item = do
            maybe empty (\lbl -> inTagsIndented "label" (text lbl)) mbmarker
            $$ contents
 
+imageMimeType :: String -> [(String, String)] -> (String, String)
+imageMimeType src kvs =
+  let mbMT = getMimeType src
+      maintype = fromMaybe "image" $
+                  lookup "mimetype" kvs `mplus`
+                  (takeWhile (/='/') <$> mbMT)
+      subtype = fromMaybe "" $
+                  lookup "mime-subtype" kvs `mplus`
+                  ((drop 1 . dropWhile (/='/')) <$> mbMT)
+  in (maintype, subtype)
+
+languageFor :: [String] -> String
+languageFor classes =
+  case langs of
+     (l:_) -> escapeStringForXML l
+     []    -> ""
+    where isLang l    = map toLower l `elem` map (map toLower) languages
+          langsFrom s = if isLang s
+                           then [s]
+                           else languagesByExtension . map toLower $ s
+          langs       = concatMap langsFrom classes
+
+codeAttr :: Attr -> (String, [(String, String)])
+codeAttr (ident,classes,kvs) = (lang, attr)
+    where
+       attr = [("id",ident) | not (null ident)] ++
+              [("language",lang) | not (null lang)] ++
+              [(k,v) | (k,v) <- kvs, k `elem` ["code-type",
+                "code-version", "executable",
+                "language-version", "orientation",
+                    "platforms", "position", "specific-use"]]
+       lang  = languageFor classes
+
 -- | Convert a Pandoc block element to JATS.
 blockToJATS :: PandocMonad m => WriterOptions -> Block -> JATS m Doc
 blockToJATS _ Null = return empty
@@ -168,6 +201,13 @@ blockToJATS opts (Div ('r':'e':'f':'-':_,_,_) [Para lst]) =
 blockToJATS opts (Div ("refs",_,_) xs) = do
   contents <- blocksToJATS opts xs
   return $ inTagsIndented "ref-list" contents
+blockToJATS opts (Div (ident,[cls],kvs) bs) | cls `elem` ["fig", "caption", "table-wrap"] = do
+  contents <- blocksToJATS opts bs
+  let attr = [("id", ident) | not (null ident)] ++
+             [("xml:lang",l) | ("lang",l) <- kvs] ++
+             [(k,v) | (k,v) <- kvs, k `elem` ["specific-use",
+                 "content-type", "orientation", "position"]]
+  return $ inTags True cls attr contents
 blockToJATS opts (Div (ident,_,kvs) bs) = do
   contents <- blocksToJATS opts bs
   let attr = [("id", ident) | not (null ident)] ++
@@ -175,58 +215,50 @@ blockToJATS opts (Div (ident,_,kvs) bs) = do
              [(k,v) | (k,v) <- kvs, k `elem` ["specific-use",
                  "content-type", "orientation", "position"]]
   return $ inTags True "boxed-text" attr contents
-blockToJATS _ h@(Header{}) = do
-  -- should not occur after hierarchicalize, except inside lists/blockquotes
-  report $ BlockNotRendered h
-  return empty
+blockToJATS opts (Header _ _ title) = do
+  title' <- inlinesToJATS opts title
+  return $ inTagsSimple "title" title'
 -- No Plain, everything needs to be in a block-level tag
 blockToJATS opts (Plain lst) = blockToJATS opts (Para lst)
 -- title beginning with fig: indicates that the image is a figure
 blockToJATS opts (Para [Image (ident,_,kvs) txt
   (src,'f':'i':'g':':':tit)]) = do
   alt <- inlinesToJATS opts txt
+  let (maintype, subtype) = imageMimeType src kvs
   let capt = if null txt
                 then empty
                 else inTagsSimple "caption" alt
   let attr = [("id", ident) | not (null ident)] ++
              [(k,v) | (k,v) <- kvs, k `elem` ["fig-type", "orientation",
                                               "position", "specific-use"]]
-  let mbMT = getMimeType src
-  let maintype = fromMaybe "image" $
-                  lookup "mimetype" kvs `mplus`
-                  (takeWhile (/='/') <$> mbMT)
-  let subtype = fromMaybe "" $
-                  lookup "mime-subtype" kvs `mplus`
-                  ((drop 1 . dropWhile (/='/')) <$> mbMT)
   let graphicattr = [("mimetype",maintype),
-                     ("mime-subtype",drop 1 subtype),
+                     ("mime-subtype",subtype),
                      ("xlink:href",src),  -- do we need to URL escape this?
                      ("xlink:title",tit)]
   return $ inTags True "fig" attr $
               capt $$ selfClosingTag "graphic" graphicattr
+blockToJATS _ (Para [Image (ident,_,kvs) _ (src, tit)]) = do
+  let (maintype, subtype) = imageMimeType src kvs
+  let attr = [("id", ident) | not (null ident)] ++
+             [("mimetype", maintype),
+              ("mime-subtype", subtype),
+              ("xlink:href", src)] ++
+             [("xlink:title", tit) | not (null tit)] ++
+             [(k,v) | (k,v) <- kvs, k `elem` ["baseline-shift",
+                        "content-type", "specific-use", "xlink:actuate",
+                        "xlink:href", "xlink:role", "xlink:show",
+                        "xlink:type"]]
+  return $ selfClosingTag "graphic" attr
 blockToJATS opts (Para lst) =
   inTagsIndented "p" <$> inlinesToJATS opts lst
 blockToJATS opts (LineBlock lns) =
   blockToJATS opts $ linesToPara lns
 blockToJATS opts (BlockQuote blocks) =
   inTagsIndented "disp-quote" <$> blocksToJATS opts blocks
-blockToJATS _ (CodeBlock (ident,classes,kvs) str) = return $
+blockToJATS _ (CodeBlock a str) = return $
   inTags False tag attr (flush (text (escapeStringForXML str)))
-    where attr  = [("id",ident) | not (null ident)] ++
-                  [("language",lang) | not (null lang)] ++
-                  [(k,v) | (k,v) <- kvs, k `elem` ["code-type",
-                    "code-version", "executable",
-                    "language-version", "orientation",
-                    "platforms", "position", "specific-use"]]
-          tag   = if null lang then "preformat" else "code"
-          lang  = case langs of
-                     (l:_) -> escapeStringForXML l
-                     []    -> ""
-          isLang l    = map toLower l `elem` map (map toLower) languages
-          langsFrom s = if isLang s
-                           then [s]
-                           else languagesByExtension . map toLower $ s
-          langs       = concatMap langsFrom classes
+    where (lang, attr) = codeAttr a
+          tag          = if null lang then "preformat" else "code"
 blockToJATS _ (BulletList []) = return empty
 blockToJATS opts (BulletList lst) =
   inTags True "list" [("list-type", "bullet")] <$>
@@ -293,6 +325,9 @@ tableItemToJATS :: PandocMonad m
                    -> Bool
                    -> [Block]
                    -> JATS m Doc
+tableItemToJATS opts isHeader [Plain item] =
+  inTags True (if isHeader then "th" else "td") [] <$>
+    inlinesToJATS opts item
 tableItemToJATS opts isHeader item =
   (inTags True (if isHeader then "th" else "td") [] . vcat) <$>
     mapM (blockToJATS opts) item
@@ -323,8 +358,10 @@ inlineToJATS opts (Quoted SingleQuote lst) = do
 inlineToJATS opts (Quoted DoubleQuote lst) = do
   contents <- inlinesToJATS opts lst
   return $ char '“' <> contents <> char '”'
-inlineToJATS _ (Code _ str) =
-  return $ inTagsSimple "monospace" $ text (escapeStringForXML str)
+inlineToJATS _ (Code a str) =
+  return $ inTags False tag attr $ text (escapeStringForXML str)
+    where (lang, attr) = codeAttr a
+          tag          = if null lang then "monospace" else "code"
 inlineToJATS _ il@(RawInline f x)
   | f == "jats" = return $ text x
   | otherwise   = do
@@ -379,11 +416,14 @@ inlineToJATS _ (Link _attr [Str t] ('m':'a':'i':'l':'t':'o':':':email, _))
   return $ inTagsSimple "email" $ text (escapeStringForXML email)
 inlineToJATS opts (Link (ident,_,kvs) txt ('#':src, _)) = do
   let attr = [("id", ident) | not (null ident)] ++
-             [("alt", stringify txt),
-              ("rid", src)] ++
+             [("alt", stringify txt) | not (null txt)] ++
+             [("rid", src)] ++
              [(k,v) | (k,v) <- kvs, k `elem` ["ref-type", "specific-use"]]
-  contents <- inlinesToJATS opts txt
-  return $ inTags False "xref" attr contents
+  if null txt
+     then return $ selfClosingTag "xref" attr
+     else do
+        contents <- inlinesToJATS opts txt
+        return $ inTags False "xref" attr contents
 inlineToJATS opts (Link (ident,_,kvs) txt (src, tit)) = do
   let attr = [("id", ident) | not (null ident)] ++
              [("ext-link-type", "uri"),

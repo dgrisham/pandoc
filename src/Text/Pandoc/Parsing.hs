@@ -6,7 +6,7 @@
 {-# LANGUAGE MultiParamTypeClasses      #-}
 {-# LANGUAGE TypeSynonymInstances       #-}
 {-
-Copyright (C) 2006-2017 John MacFarlane <jgm@berkeley.edu>
+Copyright (C) 2006-2018 John MacFarlane <jgm@berkeley.edu>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -25,7 +25,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 {- |
    Module      : Text.Pandoc.Parsing
-   Copyright   : Copyright (C) 2006-2017 John MacFarlane
+   Copyright   : Copyright (C) 2006-2018 John MacFarlane
    License     : GNU GPL, version 2 or above
 
    Maintainer  : John MacFarlane <jgm@berkeley.edu>
@@ -65,6 +65,11 @@ module Text.Pandoc.Parsing ( takeWhileP,
                              withRaw,
                              escaped,
                              characterReference,
+                             upperRoman,
+                             lowerRoman,
+                             decimal,
+                             lowerAlpha,
+                             upperAlpha,
                              anyOrderedListMarker,
                              orderedListMarker,
                              charRef,
@@ -180,6 +185,7 @@ module Text.Pandoc.Parsing ( takeWhileP,
                              sourceLine,
                              setSourceColumn,
                              setSourceLine,
+                             incSourceColumn,
                              newPos,
                              Line,
                              Column
@@ -188,12 +194,12 @@ where
 
 import Control.Monad.Identity
 import Control.Monad.Reader
-import Data.Char (chr, isAlphaNum, isAscii, isAsciiUpper, isHexDigit, isPunctuation, isSpace,
-                  ord, toLower, toUpper)
+import Data.Char (chr, isAlphaNum, isAscii, isAsciiUpper, isHexDigit,
+                  isPunctuation, isSpace, ord, toLower, toUpper)
 import Data.Default
 import Data.List (intercalate, isSuffixOf, transpose)
 import qualified Data.Map as M
-import Data.Maybe (mapMaybe)
+import Data.Maybe (mapMaybe, fromMaybe)
 import Data.Monoid ((<>))
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -303,7 +309,7 @@ indentWith :: Stream s m Char
            => Int -> ParserT s st m [Char]
 indentWith num = do
   tabStop <- getOption readerTabStop
-  if (num < tabStop)
+  if num < tabStop
      then count num (char ' ')
      else choice [ try (count num (char ' '))
                  , try (char '\t' >> indentWith (num - tabStop)) ]
@@ -572,7 +578,7 @@ uri = try $ do
   let uriChunk =  skipMany1 wordChar
               <|> percentEscaped
               <|> entity
-              <|> (try $ punct >>
+              <|> try (punct >>
                     lookAhead (void (satisfy isWordChar) <|> percentEscaped))
   str <- snd <$> withRaw (skipMany1 ( () <$
                                          (enclosed (char '(') (char ')') uriChunk
@@ -754,7 +760,7 @@ romanOne = (char 'i' >> return (LowerRoman, 1)) <|>
 
 -- | Parses an ordered list marker and returns list attributes.
 anyOrderedListMarker :: Stream s m Char => ParserT s ParserState m ListAttributes
-anyOrderedListMarker = choice $
+anyOrderedListMarker = choice
   [delimParser numParser | delimParser <- [inPeriod, inOneParen, inTwoParens],
                            numParser <- [decimal, exampleNum, defaultNum, romanOne,
                            lowerAlpha, lowerRoman, upperAlpha, upperRoman]]
@@ -895,7 +901,7 @@ widthsFromIndices numColumns' indices =
       quotient = if totLength > numColumns
                    then fromIntegral totLength
                    else fromIntegral numColumns
-      fracs = map (\l -> (fromIntegral l) / quotient) lengths in
+      fracs = map (\l -> fromIntegral l / quotient) lengths in
   tail fracs
 
 ---
@@ -976,7 +982,7 @@ gridTableHeader headless blocks = try $ do
                     then replicate (length underDashes) ""
                     else map (unlines . map trim) $ transpose
                        $ map (gridTableSplitLine indices) rawContent
-  heads <- fmap sequence $ mapM (parseFromString blocks . trim) rawHeads
+  heads <- sequence <$> mapM (parseFromString blocks . trim) rawHeads
   return (heads, aligns, indices)
 
 gridTableRawLine :: Stream s m Char => [Int] -> ParserT s st m [String]
@@ -1322,9 +1328,7 @@ failIfInQuoteContext :: (HasQuoteContext st m, Stream s m t)
                      -> ParserT s st m ()
 failIfInQuoteContext context = do
   context' <- getQuoteContext
-  if context' == context
-     then fail "already inside quotes"
-     else return ()
+  when (context' == context) $ fail "already inside quotes"
 
 charOrRef :: Stream s m Char => String -> ParserT s st m Char
 charOrRef cs =
@@ -1417,9 +1421,7 @@ a <+?> b = a >>= flip fmap (try b <|> return mempty) . (<>)
 extractIdClass :: Attr -> Attr
 extractIdClass (ident, cls, kvs) = (ident', cls', kvs')
   where
-    ident' = case lookup "id" kvs of
-               Just v  -> v
-               Nothing -> ident
+    ident' = fromMaybe ident (lookup "id" kvs)
     cls'   = case lookup "class" kvs of
                Just cl -> words cl
                Nothing -> cls

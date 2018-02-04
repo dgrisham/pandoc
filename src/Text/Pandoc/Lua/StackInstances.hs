@@ -1,6 +1,6 @@
 {-
-Copyright © 2012-2017 John MacFarlane <jgm@berkeley.edu>
-            2017 Albert Krewinkel <tarleb+pandoc@moltkeplatz.de>
+Copyright © 2012-2018 John MacFarlane <jgm@berkeley.edu>
+            2017-2018 Albert Krewinkel <tarleb+pandoc@moltkeplatz.de>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -16,13 +16,14 @@ You should have received a copy of the GNU General Public License
 along with this program; if not, write to the Free Software
 Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 -}
-{-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE LambdaCase        #-}
+{-# LANGUAGE FlexibleInstances    #-}
+{-# LANGUAGE LambdaCase           #-}
+{-# LANGUAGE ScopedTypeVariables  #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 {- |
    Module      : Text.Pandoc.Lua.StackInstances
-   Copyright   : © 2012-2017 John MacFarlane
-                 © 2017 Albert Krewinkel
+   Copyright   : © 2012-2018 John MacFarlane
+                 © 2017-2018 Albert Krewinkel
    License     : GNU GPL, version 2 or above
 
    Maintainer  : Albert Krewinkel <tarleb+pandoc@moltkeplatz.de>
@@ -33,31 +34,43 @@ StackValue instances for pandoc types.
 module Text.Pandoc.Lua.StackInstances () where
 
 import Control.Applicative ((<|>))
+import Control.Monad (when)
+import Control.Monad.Catch (finally)
+import Data.Data (showConstr, toConstr)
+import Data.Foldable (forM_)
 import Foreign.Lua (FromLuaStack (peek), Lua, LuaInteger, LuaNumber, StackIndex,
                     ToLuaStack (push), Type (..), throwLuaError, tryLua)
 import Text.Pandoc.Definition
-import Text.Pandoc.Lua.Util (addValue, adjustIndexBy, getTable,
-                             pushViaConstructor)
-import Text.Pandoc.Shared (safeRead)
+import Text.Pandoc.Extensions (Extensions)
+import Text.Pandoc.Lua.Util (getTable, getTag, pushViaConstructor, typeCheck)
+import Text.Pandoc.Options (ReaderOptions (..), TrackChanges)
+import Text.Pandoc.Shared (Element (Blk, Sec), safeRead)
 
 import qualified Foreign.Lua as Lua
+import qualified Data.Set as Set
+import qualified Text.Pandoc.Lua.Util as LuaUtil
+
+defineHowTo :: String -> Lua a -> Lua a
+defineHowTo ctx op = op `Lua.modifyLuaError` (("Could not " ++ ctx ++ ": ") ++)
 
 instance ToLuaStack Pandoc where
-  push (Pandoc meta blocks) = do
-    Lua.newtable
-    addValue "blocks" blocks
-    addValue "meta"   meta
+  push (Pandoc meta blocks) =
+    pushViaConstructor "Pandoc" blocks meta
 
 instance FromLuaStack Pandoc where
-  peek idx = do
+  peek idx = defineHowTo "get Pandoc value" $ do
+    typeCheck idx Lua.TypeTable
     blocks <- getTable idx "blocks"
-    meta   <- getTable idx "meta"
+    meta   <- Lua.getfield idx "meta" *> (Lua.peek Lua.stackTop `finally` Lua.pop 1)
     return $ Pandoc meta blocks
 
 instance ToLuaStack Meta where
-  push (Meta mmap) = push mmap
+  push (Meta mmap) =
+    pushViaConstructor "Meta" mmap
 instance FromLuaStack Meta where
-  peek idx = Meta <$> peek idx
+  peek idx = defineHowTo "get Meta value" $ do
+    typeCheck idx Lua.TypeTable
+    Meta <$> peek idx
 
 instance ToLuaStack MetaValue where
   push = pushMetaValue
@@ -84,12 +97,12 @@ instance ToLuaStack Citation where
 
 instance FromLuaStack Citation where
   peek idx = do
-    id' <- getTable idx "citationId"
-    prefix <- getTable idx "citationPrefix"
-    suffix <- getTable idx "citationSuffix"
-    mode <- getTable idx "citationMode"
-    num <- getTable idx "citationNoteNum"
-    hash <- getTable idx "citationHash"
+    id' <- getTable idx "id"
+    prefix <- getTable idx "prefix"
+    suffix <- getTable idx "suffix"
+    mode <- getTable idx "mode"
+    num <- getTable idx "note_num"
+    hash <- getTable idx "hash"
     return $ Citation id' prefix suffix mode num hash
 
 instance ToLuaStack Alignment where
@@ -154,7 +167,7 @@ pushMetaValue = \case
 
 -- | Interpret the value at the given stack index as meta value.
 peekMetaValue :: StackIndex -> Lua MetaValue
-peekMetaValue idx = do
+peekMetaValue idx = defineHowTo "get MetaValue" $ do
   -- Get the contents of an AST element.
   let elementContent :: FromLuaStack a => Lua a
       elementContent = peek idx
@@ -203,7 +216,8 @@ pushBlock = \case
 
 -- | Return the value at the given index as block if possible.
 peekBlock :: StackIndex -> Lua Block
-peekBlock idx = do
+peekBlock idx = defineHowTo "get Block value" $ do
+  typeCheck idx Lua.TypeTable
   tag <- getTag idx
   case tag of
       "BlockQuote"     -> BlockQuote <$> elementContent
@@ -254,7 +268,8 @@ pushInline = \case
 
 -- | Return the value at the given index as inline if possible.
 peekInline :: StackIndex -> Lua Inline
-peekInline idx = do
+peekInline idx = defineHowTo "get Inline value" $ do
+  typeCheck idx Lua.TypeTable
   tag <- getTag idx
   case tag of
     "Cite"       -> uncurry Cite <$> elementContent
@@ -284,18 +299,6 @@ peekInline idx = do
    elementContent :: FromLuaStack a => Lua a
    elementContent = getTable idx "c"
 
-getTag :: StackIndex -> Lua String
-getTag idx = do
-  top <- Lua.gettop
-  hasMT <- Lua.getmetatable idx
-  push "tag"
-  if hasMT then Lua.rawget (-2) else Lua.rawget (idx `adjustIndexBy` 1)
-  r <- tryLua (peek (-1))
-  Lua.settop top
-  case r of
-    Left (Lua.LuaException err) -> throwLuaError err
-    Right res                   -> return res
-
 withAttr :: (Attr -> a -> b) -> (LuaAttr, a) -> b
 withAttr f (attributes, x) = f (fromLuaAttr attributes) x
 
@@ -307,4 +310,67 @@ instance ToLuaStack LuaAttr where
     pushViaConstructor "Attr" id' classes kv
 
 instance FromLuaStack LuaAttr where
-  peek idx = LuaAttr <$> peek idx
+  peek idx = defineHowTo "get Attr value" (LuaAttr <$> peek idx)
+
+--
+-- Hierarchical elements
+--
+instance ToLuaStack Element where
+  push (Blk blk) = push blk
+  push (Sec lvl num attr label contents) = do
+    Lua.newtable
+    LuaUtil.addValue "level" lvl
+    LuaUtil.addValue "numbering" num
+    LuaUtil.addValue "attr" (LuaAttr attr)
+    LuaUtil.addValue "label" label
+    LuaUtil.addValue "contents" contents
+    pushSecMetaTable
+    Lua.setmetatable (-2)
+      where
+        pushSecMetaTable :: Lua ()
+        pushSecMetaTable = do
+          inexistant <- Lua.newmetatable "PandocElementSec"
+          when inexistant $ do
+            LuaUtil.addValue "t" "Sec"
+            Lua.push "__index"
+            Lua.pushvalue (-2)
+            Lua.rawset (-3)
+
+
+--
+-- Reader Options
+--
+instance ToLuaStack Extensions where
+  push exts = push (show exts)
+
+instance ToLuaStack TrackChanges where
+  push = push . showConstr . toConstr
+
+instance ToLuaStack a => ToLuaStack (Set.Set a) where
+  push set = do
+    Lua.newtable
+    forM_ set (`LuaUtil.addValue` True)
+
+instance ToLuaStack ReaderOptions where
+  push ro = do
+    let ReaderOptions
+          (extensions            :: Extensions)
+          (standalone            :: Bool)
+          (columns               :: Int)
+          (tabStop               :: Int)
+          (indentedCodeClasses   :: [String])
+          (abbreviations         :: Set.Set String)
+          (defaultImageExtension :: String)
+          (trackChanges          :: TrackChanges)
+          (stripComments         :: Bool)
+          = ro
+    Lua.newtable
+    LuaUtil.addValue "extensions" extensions
+    LuaUtil.addValue "standalone" standalone
+    LuaUtil.addValue "columns" columns
+    LuaUtil.addValue "tabStop" tabStop
+    LuaUtil.addValue "indentedCodeClasses" indentedCodeClasses
+    LuaUtil.addValue "abbreviations" abbreviations
+    LuaUtil.addValue "defaultImageExtension" defaultImageExtension
+    LuaUtil.addValue "trackChanges" trackChanges
+    LuaUtil.addValue "stripComments" stripComments

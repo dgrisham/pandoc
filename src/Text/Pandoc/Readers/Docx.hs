@@ -1,9 +1,8 @@
 {-# LANGUAGE CPP               #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE PatternGuards     #-}
-
 {-
-Copyright (C) 2014-2017 Jesse Rosenthal <jrosenthal@jhu.edu>
+Copyright (C) 2014-2018 Jesse Rosenthal <jrosenthal@jhu.edu>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -22,7 +21,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 {- |
    Module      : Text.Pandoc.Readers.Docx
-   Copyright   : Copyright (C) 2014-2017 Jesse Rosenthal
+   Copyright   : Copyright (C) 2014-2018 Jesse Rosenthal
    License     : GNU GPL, version 2 or above
 
    Maintainer  : Jesse Rosenthal <jrosenthal@jhu.edu>
@@ -82,6 +81,7 @@ import qualified Data.ByteString.Lazy as B
 import Data.Default (Default)
 import Data.List (delete, intersect)
 import qualified Data.Map as M
+import Data.Maybe (isJust, fromMaybe)
 import Data.Sequence (ViewL (..), viewl)
 import qualified Data.Sequence as Seq
 import qualified Data.Set as Set
@@ -118,16 +118,26 @@ readDocx _ _ =
   throwError $ PandocSomeError "couldn't parse docx file"
 
 data DState = DState { docxAnchorMap :: M.Map String String
+                     , docxAnchorSet :: Set.Set String
+                     , docxImmedPrevAnchor :: Maybe String
                      , docxMediaBag  :: MediaBag
                      , docxDropCap   :: Inlines
                      , docxWarnings  :: [String]
+                     -- keep track of (numId, lvl) values for
+                     -- restarting
+                     , docxListState :: M.Map (String, String) Integer
+                     , docxPrevPara  :: Inlines
                      }
 
 instance Default DState where
   def = DState { docxAnchorMap = M.empty
+               , docxAnchorSet = mempty
+               , docxImmedPrevAnchor = Nothing
                , docxMediaBag  = mempty
                , docxDropCap   = mempty
                , docxWarnings  = []
+               , docxListState = M.empty
+               , docxPrevPara  = mempty
                }
 
 data DEnv = DEnv { docxOptions       :: ReaderOptions
@@ -177,7 +187,7 @@ bodyPartsToMeta' :: PandocMonad m => [BodyPart] -> DocxContext m (M.Map String M
 bodyPartsToMeta' [] = return M.empty
 bodyPartsToMeta' (bp : bps)
   | (Paragraph pPr parParts) <- bp
-  , (c : _)<- intersect (pStyle pPr) (M.keys metaStyles)
+  , (c : _)<- (pStyle pPr) `intersect` (M.keys metaStyles)
   , (Just metaField) <- M.lookup c metaStyles = do
     inlines <- smushInlines <$> mapM parPartToInlines parParts
     remaining <- bodyPartsToMeta' bps
@@ -330,14 +340,32 @@ blocksToInlinesWarn cmtId blks = do
       notParaOrPlain (Para _)  = False
       notParaOrPlain (Plain _) = False
       notParaOrPlain _         = True
-  unless (null $ filter notParaOrPlain blkList) $
+  unless ( not (any notParaOrPlain blkList)) $
     lift $ P.report $ DocxParserWarning $
       "Docx comment " ++ cmtId ++ " will not retain formatting"
-  return $ fromList $ blocksToInlines blkList
+  return $ blocksToInlines' blkList
 
+-- The majority of work in this function is done in the primed
+-- subfunction `partPartToInlines'`. We make this wrapper so that we
+-- don't have to modify `docxImmedPrevAnchor` state after every function.
 parPartToInlines :: PandocMonad m => ParPart -> DocxContext m Inlines
-parPartToInlines (PlainRun r) = runToInlines r
-parPartToInlines (Insertion _ author date runs) = do
+parPartToInlines parPart =
+  case parPart of
+    (BookMark _ anchor) | notElem anchor dummyAnchors -> do
+      inHdrBool <- asks docxInHeaderBlock
+      ils <- parPartToInlines' parPart
+      immedPrevAnchor <- gets docxImmedPrevAnchor
+      unless (isJust immedPrevAnchor || inHdrBool)
+        (modify $ \s -> s{ docxImmedPrevAnchor = Just anchor})
+      return ils
+    _ -> do
+      ils <- parPartToInlines' parPart
+      modify $ \s -> s{ docxImmedPrevAnchor = Nothing}
+      return ils
+
+parPartToInlines' :: PandocMonad m => ParPart -> DocxContext m Inlines
+parPartToInlines' (PlainRun r) = runToInlines r
+parPartToInlines' (ChangedRuns (TrackedChange Insertion (ChangeInfo _ author date)) runs) = do
   opts <- asks docxOptions
   case readerTrackChanges opts of
     AcceptChanges -> smushInlines <$> mapM runToInlines runs
@@ -346,7 +374,7 @@ parPartToInlines (Insertion _ author date runs) = do
       ils <- smushInlines <$> mapM runToInlines runs
       let attr = ("", ["insertion"], [("author", author), ("date", date)])
       return $ spanWith attr ils
-parPartToInlines (Deletion _ author date runs) = do
+parPartToInlines' (ChangedRuns (TrackedChange Deletion (ChangeInfo _ author date)) runs) = do
   opts <- asks docxOptions
   case readerTrackChanges opts of
     AcceptChanges -> return mempty
@@ -355,7 +383,7 @@ parPartToInlines (Deletion _ author date runs) = do
       ils <- smushInlines <$> mapM runToInlines runs
       let attr = ("", ["deletion"], [("author", author), ("date", date)])
       return $ spanWith attr ils
-parPartToInlines (CommentStart cmtId author date bodyParts) = do
+parPartToInlines' (CommentStart cmtId author date bodyParts) = do
   opts <- asks docxOptions
   case readerTrackChanges opts of
     AllChanges -> do
@@ -364,16 +392,16 @@ parPartToInlines (CommentStart cmtId author date bodyParts) = do
       let attr = ("", ["comment-start"], [("id", cmtId), ("author", author), ("date", date)])
       return $ spanWith attr ils
     _ -> return mempty
-parPartToInlines (CommentEnd cmtId) = do
+parPartToInlines' (CommentEnd cmtId) = do
   opts <- asks docxOptions
   case readerTrackChanges opts of
     AllChanges -> do
       let attr = ("", ["comment-end"], [("id", cmtId)])
       return $ spanWith attr mempty
     _ -> return mempty
-parPartToInlines (BookMark _ anchor) | anchor `elem` dummyAnchors =
+parPartToInlines' (BookMark _ anchor) | anchor `elem` dummyAnchors =
   return mempty
-parPartToInlines (BookMark _ anchor) =
+parPartToInlines' (BookMark _ anchor) =
   -- We record these, so we can make sure not to overwrite
   -- user-defined anchor links with header auto ids.
   do
@@ -389,28 +417,40 @@ parPartToInlines (BookMark _ anchor) =
     -- of rewriting user-defined anchor links. However, since these
     -- are not defined in pandoc, it seems like a necessary evil to
     -- avoid an extra pass.
-    let newAnchor =
-          if not inHdrBool && anchor `elem` M.elems anchorMap
-          then uniqueIdent [Str anchor] (Set.fromList $ M.elems anchorMap)
-          else anchor
-    unless inHdrBool
-      (modify $ \s -> s { docxAnchorMap = M.insert anchor newAnchor anchorMap})
-    return $ spanWith (newAnchor, ["anchor"], []) mempty
-parPartToInlines (Drawing fp title alt bs ext) = do
+    immedPrevAnchor <- gets docxImmedPrevAnchor
+    case immedPrevAnchor of
+      Just prevAnchor -> do
+        unless inHdrBool
+          (modify $ \s -> s { docxAnchorMap = M.insert anchor prevAnchor anchorMap})
+        return mempty
+      Nothing -> do
+        let newAnchor =
+              if not inHdrBool && anchor `elem` M.elems anchorMap
+              then uniqueIdent [Str anchor] (Set.fromList $ M.elems anchorMap)
+              else anchor
+        unless inHdrBool
+          (modify $ \s -> s { docxAnchorMap = M.insert anchor newAnchor anchorMap})
+        return $ spanWith (newAnchor, ["anchor"], []) mempty
+parPartToInlines' (Drawing fp title alt bs ext) = do
   (lift . lift) $ P.insertMedia fp Nothing bs
   return $ imageWith (extentToAttr ext) fp title $ text alt
-parPartToInlines Chart =
+parPartToInlines' Chart =
   return $ spanWith ("", ["chart"], []) $ text "[CHART]"
-parPartToInlines (InternalHyperLink anchor runs) = do
+parPartToInlines' (InternalHyperLink anchor runs) = do
   ils <- smushInlines <$> mapM runToInlines runs
   return $ link ('#' : anchor) "" ils
-parPartToInlines (ExternalHyperLink target runs) = do
+parPartToInlines' (ExternalHyperLink target runs) = do
   ils <- smushInlines <$> mapM runToInlines runs
   return $ link target "" ils
-parPartToInlines (PlainOMath exps) =
+parPartToInlines' (PlainOMath exps) =
   return $ math $ writeTeX exps
-parPartToInlines (SmartTag runs) = do
+parPartToInlines' (SmartTag runs) =
   smushInlines <$> mapM runToInlines runs
+parPartToInlines' (Field info runs) =
+  case info of
+    HyperlinkField url -> parPartToInlines' $ ExternalHyperLink url runs
+    UnknownField -> smushInlines <$> mapM runToInlines runs
+parPartToInlines' NullParPart = return mempty
 
 isAnchorSpan :: Inline -> Bool
 isAnchorSpan (Span (_, classes, kvs) _) =
@@ -528,30 +568,72 @@ bodyPartToBlocks (Paragraph pPr parparts)
       headerWith ("", delete style (pStyle pPr), []) n ils
   | otherwise = do
     ils <- (trimSps . smushInlines) <$> mapM parPartToInlines parparts
+    prevParaIls <- gets docxPrevPara
     dropIls <- gets docxDropCap
     let ils' = dropIls <> ils
     if dropCap pPr
       then do modify $ \s -> s { docxDropCap = ils' }
               return mempty
       else do modify $ \s -> s { docxDropCap = mempty }
-              return $ case isNull ils' of
-                True -> mempty
-                _    -> parStyleToTransform pPr $ para ils'
-bodyPartToBlocks (ListItem pPr numId lvl (Just levelInfo) parparts) = do
-  let
-    kvs = case levelInfo of
-      (_, fmt, txt, Just start) -> [ ("level", lvl)
-                                   , ("num-id", numId)
-                                   , ("format", fmt)
-                                   , ("text", txt)
-                                   , ("start", show start)
-                                   ]
+              let ils'' = prevParaIls <>
+                          (if isNull prevParaIls then mempty else space) <>
+                          ils'
+              opts <- asks docxOptions
+              case () of
 
-      (_, fmt, txt, Nothing)    -> [ ("level", lvl)
-                                   , ("num-id", numId)
-                                   , ("format", fmt)
-                                   , ("text", txt)
-                                   ]
+                _ | isNull ils'' && not (isEnabled Ext_empty_paragraphs opts) ->
+                    return mempty
+                _ | Just (TrackedChange Insertion _) <- pChange pPr
+                  , AcceptChanges <- readerTrackChanges opts -> do
+                      modify $ \s -> s {docxPrevPara = mempty}
+                      return $ parStyleToTransform pPr $ para ils''
+                _ | Just (TrackedChange Insertion _) <- pChange pPr
+                  , RejectChanges <- readerTrackChanges opts -> do
+                      modify $ \s -> s {docxPrevPara = ils''}
+                      return mempty
+                _ | Just (TrackedChange Insertion cInfo) <- pChange pPr
+                  , AllChanges <- readerTrackChanges opts
+                  , ChangeInfo _ cAuthor cDate <- cInfo -> do
+                      let attr = ("", ["paragraph-insertion"], [("author", cAuthor), ("date", cDate)])
+                          insertMark = spanWith attr mempty
+                      return $
+                        parStyleToTransform pPr $
+                        para $ ils'' <> insertMark
+                _ | Just (TrackedChange Deletion _) <- pChange pPr
+                  , AcceptChanges <- readerTrackChanges opts -> do
+                      modify $ \s -> s {docxPrevPara = ils''}
+                      return mempty
+                _ | Just (TrackedChange Deletion _) <- pChange pPr
+                  , RejectChanges <- readerTrackChanges opts -> do
+                      modify $ \s -> s {docxPrevPara = mempty}
+                      return $ parStyleToTransform pPr $ para ils''
+                _ | Just (TrackedChange Deletion cInfo) <- pChange pPr
+                  , AllChanges <- readerTrackChanges opts
+                  , ChangeInfo _ cAuthor cDate <- cInfo -> do
+                      let attr = ("", ["paragraph-deletion"], [("author", cAuthor), ("date", cDate)])
+                          insertMark = spanWith attr mempty
+                      return $
+                        parStyleToTransform pPr $
+                        para $ ils'' <> insertMark
+                _ | otherwise -> do
+                      modify $ \s -> s {docxPrevPara = mempty}
+                      return $ parStyleToTransform pPr $ para ils''
+bodyPartToBlocks (ListItem pPr numId lvl (Just levelInfo) parparts) = do
+  -- We check whether this current numId has previously been used,
+  -- since Docx expects us to pick up where we left off.
+  listState <- gets docxListState
+  let startFromState = M.lookup (numId, lvl) listState
+      (_, fmt,txt, startFromLevelInfo) = levelInfo
+      start = case startFromState of
+        Just n -> n + 1
+        Nothing -> fromMaybe 1 startFromLevelInfo
+      kvs = [ ("level", lvl)
+            , ("num-id", numId)
+            , ("format", fmt)
+            , ("text", txt)
+            , ("start", show start)
+            ]
+  modify $ \st -> st{ docxListState = M.insert (numId, lvl) start listState}
   blks <- bodyPartToBlocks (Paragraph pPr parparts)
   return $ divWith ("", ["list-item"], kvs) blks
 bodyPartToBlocks (ListItem pPr _ _ _ parparts) =
@@ -595,13 +677,32 @@ bodyPartToBlocks (OMathPara e) =
 rewriteLink' :: PandocMonad m => Inline -> DocxContext m Inline
 rewriteLink' l@(Link attr ils ('#':target, title)) = do
   anchorMap <- gets docxAnchorMap
-  return $ case M.lookup target anchorMap of
-    Just newTarget -> Link attr ils ('#':newTarget, title)
-    Nothing        -> l
+  case M.lookup target anchorMap of
+    Just newTarget -> do
+      modify $ \s -> s{docxAnchorSet = Set.insert newTarget (docxAnchorSet s)}
+      return $ Link attr ils ('#':newTarget, title)
+    Nothing        -> do
+      modify $ \s -> s{docxAnchorSet = Set.insert target (docxAnchorSet s)}
+      return l
 rewriteLink' il = return il
 
 rewriteLinks :: PandocMonad m => [Block] -> DocxContext m [Block]
 rewriteLinks = mapM (walkM rewriteLink')
+
+removeOrphanAnchors'' :: PandocMonad m => Inline -> DocxContext m [Inline]
+removeOrphanAnchors'' s@(Span (ident, classes, _) ils)
+  | "anchor" `elem` classes = do
+      anchorSet <- gets docxAnchorSet
+      return $ if ident `Set.member` anchorSet
+               then [s]
+               else ils
+removeOrphanAnchors'' il = return [il]
+
+removeOrphanAnchors' :: PandocMonad m => [Inline] -> DocxContext m [Inline]
+removeOrphanAnchors' ils = liftM concat $ mapM removeOrphanAnchors'' ils
+
+removeOrphanAnchors :: PandocMonad m => [Block] -> DocxContext m [Block]
+removeOrphanAnchors = mapM (walkM removeOrphanAnchors')
 
 bodyToOutput :: PandocMonad m => Body -> DocxContext m (Meta, [Block])
 bodyToOutput (Body bps) = do
@@ -609,7 +710,8 @@ bodyToOutput (Body bps) = do
   meta <- bodyPartsToMeta metabps
   blks <- smushBlocks <$> mapM bodyPartToBlocks blkbps
   blks' <- rewriteLinks $ blocksToDefinitions $ blocksToBullets $ toList blks
-  return (meta, blks')
+  blks'' <- removeOrphanAnchors blks'
+  return (meta, blks'')
 
 docxToOutput :: PandocMonad m
              => ReaderOptions

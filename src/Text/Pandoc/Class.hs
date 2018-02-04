@@ -78,9 +78,10 @@ module Text.Pandoc.Class ( PandocMonad(..)
                          , getResourcePath
                          , PandocIO(..)
                          , PandocPure(..)
-                         , FileTree(..)
+                         , FileTree
                          , FileInfo(..)
                          , addToFileTree
+                         , insertInFileTree
                          , runIO
                          , runIOorExplode
                          , runPure
@@ -141,9 +142,11 @@ import qualified System.Environment as IO (lookupEnv)
 import System.FilePath.Glob (match, compile)
 import System.Directory (createDirectoryIfMissing, getDirectoryContents,
                           doesDirectoryExist)
-import System.FilePath ((</>), (<.>), takeDirectory,
-         takeExtension, dropExtension, isRelative, normalise)
+import System.FilePath
+       ((</>), (<.>), takeDirectory, takeExtension, dropExtension,
+        isRelative, normalise, splitDirectories)
 import qualified System.FilePath.Glob as IO (glob)
+import qualified System.FilePath.Posix as Posix
 import qualified System.Directory as IO (getModificationTime)
 import Control.Monad as M (fail)
 import Control.Monad.State.Strict
@@ -160,8 +163,6 @@ import Text.Pandoc.Translations (Term(..), Translations, lookupTerm,
 import qualified Debug.Trace
 #ifdef EMBED_DATA_FILES
 import Text.Pandoc.Data (dataFiles)
-import qualified System.FilePath.Posix as Posix
-import System.FilePath (splitDirectories)
 #else
 import qualified Paths_pandoc as Paths
 #endif
@@ -453,7 +454,7 @@ runIO :: PandocIO a -> IO (Either PandocError a)
 runIO ma = flip evalStateT def $ runExceptT $ unPandocIO ma
 
 -- | Evaluate a 'PandocIO' operation, handling any errors
--- by exiting with an appropriate message and error status. 
+-- by exiting with an appropriate message and error status.
 runIOorExplode :: PandocIO a -> IO a
 runIOorExplode ma = runIO ma >>= handleError
 
@@ -620,6 +621,7 @@ getDefaultReferenceDocx = do
                "word/document.xml",
                "word/fontTable.xml",
                "word/footnotes.xml",
+               "word/comments.xml",
                "word/numbering.xml",
                "word/settings.xml",
                "word/webSettings.xml",
@@ -674,6 +676,68 @@ getDefaultReferenceODT = do
      Nothing   -> foldr addEntryToArchive emptyArchive <$>
                      mapM pathToEntry paths
 
+getDefaultReferencePptx :: PandocMonad m => m Archive
+getDefaultReferencePptx = do
+  -- We're going to narrow this down substantially once we get it
+  -- working.
+  let paths = [ "[Content_Types].xml"
+              , "_rels/.rels"
+              , "docProps/app.xml"
+              , "docProps/core.xml"
+              , "ppt/_rels/presentation.xml.rels"
+              , "ppt/presProps.xml"
+              , "ppt/presentation.xml"
+              , "ppt/slideLayouts/_rels/slideLayout1.xml.rels"
+              , "ppt/slideLayouts/_rels/slideLayout2.xml.rels"
+              , "ppt/slideLayouts/_rels/slideLayout3.xml.rels"
+              , "ppt/slideLayouts/_rels/slideLayout4.xml.rels"
+              , "ppt/slideLayouts/_rels/slideLayout5.xml.rels"
+              , "ppt/slideLayouts/_rels/slideLayout6.xml.rels"
+              , "ppt/slideLayouts/_rels/slideLayout7.xml.rels"
+              , "ppt/slideLayouts/_rels/slideLayout8.xml.rels"
+              , "ppt/slideLayouts/_rels/slideLayout9.xml.rels"
+              , "ppt/slideLayouts/_rels/slideLayout10.xml.rels"
+              , "ppt/slideLayouts/_rels/slideLayout11.xml.rels"
+              , "ppt/slideLayouts/slideLayout1.xml"
+              , "ppt/slideLayouts/slideLayout10.xml"
+              , "ppt/slideLayouts/slideLayout11.xml"
+              , "ppt/slideLayouts/slideLayout2.xml"
+              , "ppt/slideLayouts/slideLayout3.xml"
+              , "ppt/slideLayouts/slideLayout4.xml"
+              , "ppt/slideLayouts/slideLayout5.xml"
+              , "ppt/slideLayouts/slideLayout6.xml"
+              , "ppt/slideLayouts/slideLayout7.xml"
+              , "ppt/slideLayouts/slideLayout8.xml"
+              , "ppt/slideLayouts/slideLayout9.xml"
+              , "ppt/slideMasters/_rels/slideMaster1.xml.rels"
+              , "ppt/slideMasters/slideMaster1.xml"
+              , "ppt/slides/_rels/slide1.xml.rels"
+              , "ppt/slides/slide1.xml"
+              , "ppt/slides/_rels/slide2.xml.rels"
+              , "ppt/slides/slide2.xml"
+              , "ppt/tableStyles.xml"
+              , "ppt/theme/theme1.xml"
+              , "ppt/viewProps.xml"
+              ]
+  let toLazy = BL.fromChunks . (:[])
+  let pathToEntry path = do
+        epochtime <- (floor . utcTimeToPOSIXSeconds) <$> getCurrentTime
+        contents <- toLazy <$> readDataFile ("pptx/" ++ path)
+        return $ toEntry path epochtime contents
+  datadir <- getUserDataDir
+  mbArchive <- case datadir of
+                    Nothing   -> return Nothing
+                    Just d    -> do
+                       exists <- fileExists (d </> "reference.pptx")
+                       if exists
+                          then return (Just (d </> "reference.pptx"))
+                          else return Nothing
+  case mbArchive of
+     Just arch -> toArchive <$> readFileLazy arch
+     Nothing   -> foldr addEntryToArchive emptyArchive <$>
+                     mapM pathToEntry paths
+
+
 -- | Read file from user data directory or,
 -- if not found there, from Cabal data directory.
 readDataFile :: PandocMonad m => FilePath -> m B.ByteString
@@ -691,6 +755,8 @@ readDataFile fname = do
 readDefaultDataFile :: PandocMonad m => FilePath -> m B.ByteString
 readDefaultDataFile "reference.docx" =
   (B.concat . BL.toChunks . fromArchive) <$> getDefaultReferenceDocx
+readDefaultDataFile "reference.pptx" =
+  (B.concat . BL.toChunks . fromArchive) <$> getDefaultReferencePptx
 readDefaultDataFile "reference.odt" =
   (B.concat . BL.toChunks . fromArchive) <$> getDefaultReferenceODT
 readDefaultDataFile fname =
@@ -698,11 +764,6 @@ readDefaultDataFile fname =
   case lookup (makeCanonical fname) dataFiles of
     Nothing       -> throwError $ PandocCouldNotFindDataFileError fname
     Just contents -> return contents
-  where makeCanonical = Posix.joinPath . transformPathParts . splitDirectories
-        transformPathParts = reverse . foldl go []
-        go as     "."  = as
-        go (_:as) ".." = as
-        go as     x    = x : as
 #else
   getDataFileName fname' >>= checkExistence >>= readFileStrict
     where fname' = if fname == "MANUAL.txt" then fname else "data" </> fname
@@ -714,6 +775,13 @@ checkExistence fn = do
      then return fn
      else throwError $ PandocCouldNotFindDataFileError fn
 #endif
+
+makeCanonical :: FilePath -> FilePath
+makeCanonical = Posix.joinPath . transformPathParts . splitDirectories
+ where  transformPathParts = reverse . foldl go []
+        go as     "."  = as
+        go (_:as) ".." = as
+        go as     x    = x : as
 
 withPaths :: PandocMonad m => [FilePath] -> (FilePath -> m a) -> FilePath -> m a
 withPaths [] _ fp = throwError $ PandocResourceNotFound fp
@@ -806,6 +874,7 @@ data PureState = PureState { stStdGen     :: StdGen
                            , stTime :: UTCTime
                            , stTimeZone :: TimeZone
                            , stReferenceDocx :: Archive
+                           , stReferencePptx :: Archive
                            , stReferenceODT :: Archive
                            , stFiles :: FileTree
                            , stUserDataFiles :: FileTree
@@ -820,6 +889,7 @@ instance Default PureState where
                   , stTime = posixSecondsToUTCTime 0
                   , stTimeZone = utc
                   , stReferenceDocx = emptyArchive
+                  , stReferencePptx = emptyArchive
                   , stReferenceODT = emptyArchive
                   , stFiles = mempty
                   , stUserDataFiles = mempty
@@ -848,12 +918,13 @@ newtype FileTree = FileTree {unFileTree :: M.Map FilePath FileInfo}
   deriving (Monoid)
 
 getFileInfo :: FilePath -> FileTree -> Maybe FileInfo
-getFileInfo fp tree = M.lookup fp $ unFileTree tree
+getFileInfo fp tree =
+  M.lookup (makeCanonical fp) (unFileTree tree)
 
 -- | Add the specified file to the FileTree. If file
 -- is a directory, add its contents recursively.
 addToFileTree :: FileTree -> FilePath -> IO FileTree
-addToFileTree (FileTree treemap) fp = do
+addToFileTree tree fp = do
   isdir <- doesDirectoryExist fp
   if isdir
      then do -- recursively add contents of directories
@@ -861,13 +932,17 @@ addToFileTree (FileTree treemap) fp = do
            isSpecial "."  = True
            isSpecial _    = False
        fs <- (map (fp </>) . filter (not . isSpecial)) <$> getDirectoryContents fp
-       foldM addToFileTree (FileTree treemap) fs
+       foldM addToFileTree tree fs
      else do
        contents <- B.readFile fp
        mtime <- IO.getModificationTime fp
-       return $ FileTree $
-                M.insert fp FileInfo{ infoFileMTime = mtime
-                                    , infoFileContents = contents } treemap
+       return $ insertInFileTree fp FileInfo{ infoFileMTime = mtime
+                                            , infoFileContents = contents } tree
+
+-- | Insert an ersatz file into the 'FileTree'.
+insertInFileTree :: FilePath -> FileInfo -> FileTree -> FileTree
+insertInFileTree fp info (FileTree treemap) =
+  FileTree $ M.insert (makeCanonical fp) info treemap
 
 newtype PandocPure a = PandocPure {
   unPandocPure :: ExceptT PandocError

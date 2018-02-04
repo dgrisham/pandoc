@@ -4,7 +4,7 @@
 {-# LANGUAGE OverloadedStrings     #-}
 {-# LANGUAGE ViewPatterns          #-}
 {-
-Copyright (C) 2006-2017 John MacFarlane <jgm@berkeley.edu>
+Copyright (C) 2006-2018 John MacFarlane <jgm@berkeley.edu>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -23,7 +23,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 {- |
    Module      : Text.Pandoc.Readers.HTML
-   Copyright   : Copyright (C) 2006-2017 John MacFarlane
+   Copyright   : Copyright (C) 2006-2018 John MacFarlane
    License     : GNU GPL, version 2 or above
 
    Maintainer  : John MacFarlane <jgm@berkeley.edu>
@@ -43,15 +43,15 @@ module Text.Pandoc.Readers.HTML ( readHtml
                                 ) where
 
 import Control.Applicative ((<|>))
-import Control.Arrow ((***))
+import Control.Arrow (first)
 import Control.Monad (guard, mplus, msum, mzero, unless, void)
 import Control.Monad.Except (throwError)
 import Control.Monad.Reader (ReaderT, ask, asks, lift, local, runReaderT)
 import Data.Char (isAlphaNum, isDigit, isLetter)
 import Data.Default (Default (..), def)
 import Data.Foldable (for_)
-import Data.List (intercalate, isPrefixOf)
-import Data.List.Split (wordsBy)
+import Data.List (isPrefixOf)
+import Data.List.Split (wordsBy, splitWhen)
 import qualified Data.Map as M
 import Data.Maybe (fromMaybe, isJust, isNothing)
 import Data.Monoid (First (..), (<>))
@@ -68,12 +68,14 @@ import Text.Pandoc.CSS (foldOrElse, pickStyleAttrProps)
 import Text.Pandoc.Definition
 import Text.Pandoc.Error
 import Text.Pandoc.Logging
-import Text.Pandoc.Options (Extension (Ext_epub_html_exts, Ext_native_divs, Ext_native_spans, Ext_raw_html),
-                            ReaderOptions (readerExtensions, readerStripComments),
-                            extensionEnabled)
+import Text.Pandoc.Options (
+    Extension (Ext_epub_html_exts, Ext_empty_paragraphs, Ext_native_divs,
+               Ext_native_spans, Ext_raw_html, Ext_line_blocks),
+    ReaderOptions (readerExtensions, readerStripComments),
+    extensionEnabled)
 import Text.Pandoc.Parsing hiding ((<|>))
-import Text.Pandoc.Shared (addMetaField, crFilter, escapeURI, extractSpaces,
-                           safeRead, underlineSpan)
+import Text.Pandoc.Shared (addMetaField, blocksToInlines', crFilter, escapeURI,
+                           extractSpaces, safeRead, underlineSpan)
 import Text.Pandoc.Walk
 import Text.Parsec.Error
 import Text.TeXMath (readMathML, writeTeX)
@@ -189,6 +191,7 @@ block = do
             , pHtml
             , pHead
             , pBody
+            , pLineBlock
             , pDiv
             , pPlain
             , pFigure
@@ -375,6 +378,16 @@ pRawTag = do
      then return mempty
      else return $ renderTags' [tag]
 
+pLineBlock :: PandocMonad m => TagParser m Blocks
+pLineBlock = try $ do
+  guardEnabled Ext_line_blocks
+  _ <- pSatisfy $ tagOpen (=="div") (== [("class","line-block")])
+  ils <- trimInlines . mconcat <$> manyTill inline (pSatisfy (tagClose (=="div")))
+  let lns = map B.fromList $
+            splitWhen (== LineBreak) $ filter (/= SoftBreak) $
+            B.toList ils
+  return $ B.lineBlock lns
+
 pDiv :: PandocMonad m => TagParser m Blocks
 pDiv = try $ do
   guardEnabled Ext_native_divs
@@ -518,15 +531,18 @@ pCol = try $ do
   skipMany pBlank
   optional $ pSatisfy (matchTagClose "col")
   skipMany pBlank
-  return $ case lookup "width" attribs of
+  let width = case lookup "width" attribs of
            Nothing -> case lookup "style" attribs of
                Just ('w':'i':'d':'t':'h':':':xs) | '%' `elem` xs ->
-                 fromMaybe 0.0 $ safeRead ('0':'.':filter
+                 fromMaybe 0.0 $ safeRead (filter
                    (`notElem` (" \t\r\n%'\";" :: [Char])) xs)
                _ -> 0.0
            Just x | not (null x) && last x == '%' ->
-             fromMaybe 0.0 $ safeRead ('0':'.':init x)
+             fromMaybe 0.0 $ safeRead (init x)
            _ -> 0.0
+  if width > 0.0
+    then return $ width / 100.0
+    else return 0.0
 
 pColgroup :: PandocMonad m => TagParser m [Double]
 pColgroup = try $ do
@@ -575,7 +591,10 @@ pPlain = do
 pPara :: PandocMonad m => TagParser m Blocks
 pPara = do
   contents <- trimInlines <$> pInTags "p" inline
-  return $ B.para contents
+  (do guardDisabled Ext_empty_paragraphs
+      guard (B.isNull contents)
+      return mempty)
+    <|> return (B.para contents)
 
 pFigure :: PandocMonad m => TagParser m Blocks
 pFigure = try $ do
@@ -583,8 +602,9 @@ pFigure = try $ do
   skipMany pBlank
   let pImg  = (\x -> (Just x, Nothing)) <$>
                (pOptInTag "p" pImage <* skipMany pBlank)
-      pCapt = (\x -> (Nothing, Just x)) <$>
-               (pInTags "figcaption" inline <* skipMany pBlank)
+      pCapt = (\x -> (Nothing, Just x)) <$> do
+                bs <- pInTags "figcaption" block
+                return $ blocksToInlines' $ B.toList bs
       pSkip = (Nothing, Nothing) <$ pSatisfy (not . matchTagClose "figure")
   res <- many (pImg <|> pCapt <|> pSkip)
   let mbimg = msum $ map fst res
@@ -757,7 +777,7 @@ pCode = try $ do
   (TagOpen open attr') <- pSatisfy $ tagOpen (`elem` ["code","tt"]) (const True)
   let attr = toStringAttr attr'
   result <- manyTill pAnyTag (pCloses open)
-  return $ B.codeWith (mkAttr attr) $ intercalate " " $ lines $ T.unpack $
+  return $ B.codeWith (mkAttr attr) $ unwords $ lines $ T.unpack $
            innerText result
 
 pSpan :: PandocMonad m => TagParser m Inlines
@@ -1147,11 +1167,12 @@ htmlTag f = try $ do
   -- <www.boe.es/buscar/act.php?id=BOE-A-1996-8930#a66>
   -- should NOT be parsed as an HTML tag, see #2277,
   -- so we exclude . even though it's a valid character
-  -- in XML elemnet names
+  -- in XML element names
   let isNameChar c = isAlphaNum c || c == ':' || c == '-' || c == '_'
   let isName s = case s of
-                      []     -> False
-                      (c:cs) -> isLetter c && all isNameChar cs
+                      []      -> False
+                      ('?':_) -> True -- processing instruction
+                      (c:cs)  -> isLetter c && all isNameChar cs
 
   let endpos = if ln == 1
                   then setSourceColumn startpos
@@ -1206,7 +1227,7 @@ stripPrefixes = map stripPrefix
 
 stripPrefix :: Tag Text -> Tag Text
 stripPrefix (TagOpen s as) =
-    TagOpen (stripPrefix' s) (map (stripPrefix' *** id) as)
+    TagOpen (stripPrefix' s) (map (first stripPrefix') as)
 stripPrefix (TagClose s) = TagClose (stripPrefix' s)
 stripPrefix x = x
 

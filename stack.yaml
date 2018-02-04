@@ -1,20 +1,25 @@
 flags:
   pandoc:
     trypandoc: false
-    embed_data_files: false
+    embed_data_files: true
     old-locale: false
     network-uri: true
+  pandoc-citeproc:
+    bibutils: true
+    embed_data_files: true
+    unicode_collation: false
+    test_citeproc: false
+    debug: false
 packages:
 - '.'
 extra-deps:
-- pandoc-types-1.17.3
-- hslua-0.9.2
-- hslua-module-text-0.1.2
-- skylighting-0.4.4
-- texmath-0.10
-- cmark-gfm-0.1.1
-- QuickCheck-2.10.0.1
-- tasty-quickcheck-0.9.1
-- doctemplates-0.2.1
-- haddock-library-1.4.3
-resolver: lts-9.9
+- pandoc-citeproc-0.14.1.2
+- hslua-0.9.5
+- skylighting-0.6
+- ansi-terminal-0.7.1.1
+- tasty-1.0.0.1
+- texmath-0.10.1.1
+- tagsoup-0.14.3
+ghc-options:
+   "$locals": -fhide-source-paths
+resolver: lts-10.3

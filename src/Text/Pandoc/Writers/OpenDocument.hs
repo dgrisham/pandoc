@@ -2,7 +2,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE PatternGuards     #-}
 {-
-Copyright (C) 2008-2017 Andrea Rossato <andrea.rossato@ing.unitn.it>
+Copyright (C) 2008-2018 Andrea Rossato <andrea.rossato@ing.unitn.it>
                         and John MacFarlane.
 
 This program is free software; you can redistribute it and/or modify
@@ -22,7 +22,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 {- |
    Module      : Text.Pandoc.Writers.OpenDocument
-   Copyright   : Copyright (C) 2008-2017 Andrea Rossato and John MacFarlane
+   Copyright   : Copyright (C) 2008-2018 Andrea Rossato and John MacFarlane
    License     : GNU GPL, version 2 or above
 
    Maintainer  : Andrea Rossato <andrea.rossato@ing.unitn.it>
@@ -130,7 +130,6 @@ setFirstPara :: PandocMonad m => OD m ()
 setFirstPara =  modify $  \s -> s { stFirstPara = True }
 
 inParagraphTags :: PandocMonad m => Doc -> OD m Doc
-inParagraphTags d | isEmpty d = return empty
 inParagraphTags d = do
   b <- gets stFirstPara
   a <- if b
@@ -174,6 +173,24 @@ inTextStyle d = do
               return $ inTags False
                   "text:span" [("text:style-name",styleName)] d
 
+formulaStyles :: [Doc]
+formulaStyles = [formulaStyle InlineMath, formulaStyle DisplayMath]
+
+formulaStyle :: MathType -> Doc
+formulaStyle mt = inTags False "style:style"
+  [("style:name", if mt == InlineMath then "fr1" else "fr2")
+  ,("style:family", "graphic")
+  ,("style:parent-style-name", "Formula")]
+  $ selfClosingTag "style:graphic-properties" $ if mt == InlineMath then
+                                                  [("style:vertical-pos", "middle")
+                                                  ,("style:vertical-rel", "text")]
+                                                else
+                                                  [("style:vertical-pos",   "middle")
+                                                  ,("style:vertical-rel",   "paragraph-content")
+                                                  ,("style:horizontal-pos", "center")
+                                                  ,("style:horizontal-rel", "paragraph-content")
+                                                  ,("style:wrap",           "none")]
+
 inHeaderTags :: PandocMonad m => Int -> Doc -> OD m Doc
 inHeaderTags i d =
   return $ inTags False "text:h" [ ("text:style-name", "Heading_20_" ++ show i)
@@ -212,7 +229,7 @@ writeOpenDocument opts (Pandoc meta blocks) = do
                   meta
            b <- render' `fmap` blocksToOpenDocument opts blocks
            return (b, m)
-  let styles   = stTableStyles s ++ stParaStyles s ++
+  let styles   = stTableStyles s ++ stParaStyles s ++ formulaStyles ++
                      map snd (sortBy (flip (comparing fst)) (
                         Map.elems (stTextStyles s)))
       listStyle (n,l) = inTags True "text:list-style"
@@ -323,7 +340,8 @@ blockToOpenDocument o bs
                                   else inParagraphTags =<< inlinesToOpenDocument o b
     | Para [Image attr c (s,'f':'i':'g':':':t)] <- bs
                              = figure attr c s t
-    | Para           b <- bs = if null b
+    | Para           b <- bs = if null b &&
+                                    not (isEnabled Ext_empty_paragraphs o)
                                   then return empty
                                   else inParagraphTags =<< inlinesToOpenDocument o b
     | LineBlock      b <- bs = blockToOpenDocument o $ linesToPara b
@@ -576,7 +594,7 @@ paraStyle attrs = do
       tight     = if t then [ ("fo:margin-top"          , "0in"    )
                             , ("fo:margin-bottom"       , "0in"    )]
                        else []
-      indent    = if (i /= 0 || b)
+      indent    = if i /= 0 || b
                       then [ ("fo:margin-left"         , indentVal)
                            , ("fo:margin-right"        , "0in"    )
                            , ("fo:text-indent"         , "0in"    )

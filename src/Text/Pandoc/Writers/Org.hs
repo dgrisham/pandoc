@@ -1,8 +1,8 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-
 Copyright (C) 2010-2015 Puneeth Chaganti <punchagan@gmail.com>
-              2010-2017 John MacFarlane <jgm@berkeley.edu>
-              2016-2017 Albert Krewinkel <tarleb+pandoc@moltkeplatz.de>
+              2010-2018 John MacFarlane <jgm@berkeley.edu>
+              2016-2018 Albert Krewinkel <tarleb+pandoc@moltkeplatz.de>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -22,8 +22,8 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 {- |
    Module      : Text.Pandoc.Writers.Org
   Copyright    : © 2010-2015 Puneeth Chaganti <punchagan@gmail.com>
-                   2010-2017 John MacFarlane <jgm@berkeley.edu>
-                   2016-2017 Albert Krewinkel <tarleb+pandoc@moltkeplatz.de>
+                   2010-2018 John MacFarlane <jgm@berkeley.edu>
+                   2016-2018 Albert Krewinkel <tarleb+pandoc@moltkeplatz.de>
    License     : GNU GPL, version 2 or above
 
    Maintainer  : Albert Krewinkel <tarleb+pandoc@moltkeplatz.de>
@@ -308,7 +308,18 @@ blockListToOrg blocks = vcat <$> mapM blockToOrg blocks
 inlineListToOrg :: PandocMonad m
                 => [Inline]
                 -> Org m Doc
-inlineListToOrg lst = hcat <$> mapM inlineToOrg lst
+inlineListToOrg lst = hcat <$> mapM inlineToOrg (fixMarkers lst)
+  where fixMarkers [] = []  -- prevent note refs and list markers from wrapping, see #4171
+        fixMarkers (Space : x : rest) | shouldFix x =
+          Str " " : x : fixMarkers rest
+        fixMarkers (SoftBreak : x : rest) | shouldFix x =
+          Str " " : x : fixMarkers rest
+        fixMarkers (x : rest) = x : fixMarkers rest
+
+        shouldFix Note{} = True -- Prevent footnotes
+        shouldFix (Str "-") = True -- Prevent bullet list items
+        -- TODO: prevent ordered list items
+        shouldFix _ = False
 
 -- | Convert Pandoc inline element to Org.
 inlineToOrg :: PandocMonad m => Inline -> Org m Doc

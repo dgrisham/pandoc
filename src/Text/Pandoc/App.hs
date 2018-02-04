@@ -4,7 +4,7 @@
 {-# LANGUAGE TemplateHaskell     #-}
 {-# LANGUAGE TupleSections       #-}
 {-
-Copyright (C) 2006-2017 John MacFarlane <jgm@berkeley.edu>
+Copyright (C) 2006-2018 John MacFarlane <jgm@berkeley.edu>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -23,7 +23,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 {- |
    Module      : Text.Pandoc.App
-   Copyright   : Copyright (C) 2006-2017 John MacFarlane
+   Copyright   : Copyright (C) 2006-2018 John MacFarlane
    License     : GNU GPL, version 2 or above
 
    Maintainer  : John MacFarlane <jgm@berkeley@edu>
@@ -35,22 +35,22 @@ Does a pandoc conversion based on command-line options.
 module Text.Pandoc.App (
             convertWithOpts
           , Opt(..)
+          , LineEnding(..)
+          , Filter(..)
           , defaultOpts
           , parseOptions
           , options
           , applyFilters
-          , applyLuaFilters
           ) where
 import qualified Control.Exception as E
 import Control.Monad
 import Control.Monad.Except (catchError, throwError)
 import Control.Monad.Trans
-import Data.Aeson (defaultOptions, eitherDecode', encode)
+import Data.Aeson (defaultOptions)
 import Data.Aeson.TH (deriveJSON)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as B
 import Data.Char (toLower, toUpper)
-import Data.Foldable (foldrM)
 import Data.List (find, intercalate, isPrefixOf, isSuffixOf, sort)
 import qualified Data.Map as M
 import Data.Maybe (fromMaybe, isJust, isNothing)
@@ -58,19 +58,23 @@ import Data.Monoid
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
+import qualified Data.Text.Lazy as TL
+import qualified Data.Text.Lazy.Encoding as TE
+import qualified Data.Text.Encoding.Error as TE
 import Data.Yaml (decode)
 import qualified Data.Yaml as Yaml
 import GHC.Generics
 import Network.URI (URI (..), parseURI)
 import Paths_pandoc (getDataDir)
-import Skylighting (Style, Syntax (..), defaultSyntaxMap, parseTheme)
-import Skylighting.Parser (addSyntaxDefinition, missingIncludes,
-                           parseSyntaxDefinition)
+import Data.Aeson.Encode.Pretty (encodePretty', Config(..), keyOrder,
+         defConfig, Indent(..), NumberFormat(..))
+import Skylighting (Style, Syntax (..), defaultSyntaxMap, parseTheme,
+                    pygments)
+import Skylighting.Parser (addSyntaxDefinition, parseSyntaxDefinition)
 import System.Console.GetOpt
-import System.Directory (Permissions (..), doesFileExist, findExecutable,
-                         getAppUserDataDirectory, getPermissions)
-import System.Environment (getArgs, getEnvironment, getProgName)
-import System.Exit (ExitCode (..), exitSuccess)
+import System.Directory (getAppUserDataDirectory)
+import System.Environment (getArgs, getProgName)
+import System.Exit (exitSuccess)
 import System.FilePath
 import System.IO (nativeNewline, stdout)
 import qualified System.IO as IO (Newline (..))
@@ -78,13 +82,12 @@ import System.IO.Error (isDoesNotExistError)
 import Text.Pandoc
 import Text.Pandoc.BCP47 (Lang (..), parseBCP47)
 import Text.Pandoc.Builder (setMeta, deleteMeta)
+import Text.Pandoc.Filter (Filter (JSONFilter, LuaFilter), applyFilters)
 import Text.Pandoc.Highlighting (highlightingStyles)
-import Text.Pandoc.Lua (LuaException (..), runLuaFilter)
 import Text.Pandoc.PDF (makePDF)
-import Text.Pandoc.Process (pipeProcess)
 import Text.Pandoc.SelfContained (makeDataURI, makeSelfContained)
-import Text.Pandoc.Shared (eastAsianLineBreakFilter, headerShift, isURI, ordNub,
-                           safeRead, tabFilter)
+import Text.Pandoc.Shared (eastAsianLineBreakFilter, stripEmptyParagraphs,
+         headerShift, isURI, ordNub, safeRead, tabFilter)
 import qualified Text.Pandoc.UTF8 as UTF8
 import Text.Pandoc.Writers.Math (defaultKaTeXURL, defaultMathJaxURL)
 import Text.Pandoc.XML (toEntities)
@@ -140,7 +143,7 @@ pdfWriterAndProg :: Maybe String              -- ^ user-specified writer name
                  -> IO (String, Maybe String) -- ^ IO (writerName, maybePdfEngineProg)
 pdfWriterAndProg mWriter mEngine = do
   let panErr msg = liftIO $ E.throwIO $ PandocAppError msg
-  case go (baseWriterName <$> mWriter) mEngine of
+  case go mWriter mEngine of
       Right (writ, prog) -> return (writ, Just prog)
       Left err           -> panErr err
     where
@@ -148,7 +151,7 @@ pdfWriterAndProg mWriter mEngine = do
       go (Just writer) Nothing = (writer,) <$> engineForWriter writer
       go Nothing (Just engine) = (,engine) <$> writerForEngine engine
       go (Just writer) (Just engine) =
-           case find (== (writer, engine)) engines of
+           case find (== (baseWriterName writer, engine)) engines of
                 Just _  -> Right (writer, engine)
                 Nothing -> Left $ "pdf-engine " ++ engine ++
                            " is not compatible with output format " ++ writer
@@ -158,7 +161,7 @@ pdfWriterAndProg mWriter mEngine = do
                                  []      -> Left $
                                    "pdf-engine " ++ eng ++ " not known"
 
-      engineForWriter w = case [e |  (f,e) <- engines, f == w] of
+      engineForWriter w = case [e |  (f,e) <- engines, f == baseWriterName w] of
                                 eng : _ -> Right eng
                                 []      -> Left $
                                    "cannot produce pdf output from " ++ w
@@ -178,11 +181,13 @@ convertWithOpts opts = do
                          Nothing -> return Nothing
                          Just fp -> Just <$> UTF8.readFile fp
 
+  let isPandocCiteproc (JSONFilter f) = takeBaseName f == "pandoc-citeproc"
+      isPandocCiteproc _              = False
   -- --bibliography implies -F pandoc-citeproc for backwards compatibility:
   let needsCiteproc = isJust (lookup "bibliography" (optMetadata opts)) &&
                       optCiteMethod opts `notElem` [Natbib, Biblatex] &&
-                      "pandoc-citeproc" `notElem` map takeBaseName filters
-  let filters' = if needsCiteproc then "pandoc-citeproc" : filters
+                      all (not . isPandocCiteproc) filters
+  let filters' = if needsCiteproc then JSONFilter "pandoc-citeproc" : filters
                                   else filters
 
   let sources = case optInputFiles opts of
@@ -220,7 +225,7 @@ convertWithOpts opts = do
             if ".lua" `isSuffixOf` format
                -- note:  use non-lowercased version writerName
                then return (TextWriter
-                       (\o d -> liftIO $ writeCustom writerName o d)
+                       (\o d -> writeCustom writerName o d)
                                :: Writer PandocIO, mempty)
                else case getWriter writerName of
                          Left e  -> E.throwIO $ PandocAppError $
@@ -258,14 +263,6 @@ convertWithOpts opts = do
 
   syntaxMap <- foldM addSyntaxMap defaultSyntaxMap
                      (optSyntaxDefinitions opts)
-
-  case missingIncludes (M.elems syntaxMap) of
-       [] -> return ()
-       xs -> E.throwIO $ PandocSyntaxMapError $
-                "Missing syntax definitions:\n" ++
-                unlines (map
-                  (\(syn,dep) -> (T.unpack syn ++ " requires " ++
-                    T.unpack dep ++ " through IncludeRules.")) xs)
 
   -- We don't want to send output to the terminal if the user
   -- does 'pandoc -t docx input.txt'; though we allow them to
@@ -458,14 +455,17 @@ convertWithOpts opts = do
 
     let transforms = (case optBaseHeaderLevel opts of
                           x | x > 1     -> (headerShift (x - 1) :)
-                            | otherwise -> id) $
+                            | otherwise -> id) .
+                     (if optStripEmptyParagraphs opts
+                         then (stripEmptyParagraphs :)
+                         else id) .
                      (if extensionEnabled Ext_east_asian_line_breaks
                             readerExts &&
                          not (extensionEnabled Ext_east_asian_line_breaks
                               writerExts &&
                               writerWrapText writerOptions == WrapPreserve)
                          then (eastAsianLineBreakFilter :)
-                         else id)
+                         else id) $
                      []
 
     let sourceToDoc :: [FilePath] -> PandocIO Pandoc
@@ -492,10 +492,9 @@ convertWithOpts opts = do
                       then fillMediaBag
                       else return)
               >=> return . addMetadata metadata
-              >=> applyLuaFilters datadir (optLuaFilters opts) format
-              >=> maybe return extractMedia (optExtractMedia opts)
               >=> applyTransforms transforms
-              >=> applyFilters readerOpts datadir filters' [format]
+              >=> applyFilters readerOpts filters' [format]
+              >=> maybe return extractMedia (optExtractMedia opts)
               )
 
     case writer of
@@ -507,7 +506,9 @@ convertWithOpts opts = do
                 case res of
                      Right pdf -> writeFnBinary outputFile pdf
                      Left err' -> liftIO $
-                       E.throwIO $ PandocPDFError (UTF8.toStringLazy err')
+                       E.throwIO $ PandocPDFError $
+                                     TL.unpack (TE.decodeUtf8With TE.lenientDecode err')
+
         Nothing -> do
                 let htmlFormat = format `elem`
                       ["html","html4","html5","s5","slidy",
@@ -532,45 +533,7 @@ convertWithOpts opts = do
 type Transform = Pandoc -> Pandoc
 
 isTextFormat :: String -> Bool
-isTextFormat s = s `notElem` ["odt","docx","epub2","epub3","epub"]
-
-externalFilter :: MonadIO m
-               => ReaderOptions -> FilePath -> [String] -> Pandoc -> m Pandoc
-externalFilter ropts f args' d = liftIO $ do
-  exists <- doesFileExist f
-  isExecutable <- if exists
-                     then executable <$> getPermissions f
-                     else return True
-  let (f', args'') = if exists
-                        then case map toLower (takeExtension f) of
-                                  _      | isExecutable -> ("." </> f, args')
-                                  ".py"  -> ("python", f:args')
-                                  ".hs"  -> ("runhaskell", f:args')
-                                  ".pl"  -> ("perl", f:args')
-                                  ".rb"  -> ("ruby", f:args')
-                                  ".php" -> ("php", f:args')
-                                  ".js"  -> ("node", f:args')
-                                  ".r"   -> ("Rscript", f:args')
-                                  _      -> (f, args')
-                        else (f, args')
-  unless (exists && isExecutable) $ do
-    mbExe <- findExecutable f'
-    when (isNothing mbExe) $
-      E.throwIO $ PandocFilterError f ("Could not find executable " ++ f')
-  env <- getEnvironment
-  let env' = Just
-           ( ("PANDOC_VERSION", pandocVersion)
-           : ("PANDOC_READER_OPTIONS", UTF8.toStringLazy (encode ropts))
-           : env )
-  (exitcode, outbs) <- E.handle filterException $
-                              pipeProcess env' f' args'' $ encode d
-  case exitcode of
-       ExitSuccess    -> either (E.throwIO . PandocFilterError f)
-                                   return $ eitherDecode' outbs
-       ExitFailure ec -> E.throwIO $ PandocFilterError f
-                           ("Filter returned error status " ++ show ec)
- where filterException :: E.SomeException -> IO a
-       filterException e = E.throwIO $ PandocFilterError f (show e)
+isTextFormat s = s `notElem` ["odt","docx","epub2","epub3","epub","pptx"]
 
 -- | Data structure for command line options.
 data Opt = Opt
@@ -615,10 +578,10 @@ data Opt = Opt
     , optDpi                   :: Int     -- ^ Dpi
     , optWrapText              :: WrapOption  -- ^ Options for wrapping text
     , optColumns               :: Int     -- ^ Line length in characters
-    , optFilters               :: [FilePath] -- ^ Filters to apply
-    , optLuaFilters            :: [FilePath] -- ^ Lua filters to apply
+    , optFilters               :: [Filter] -- ^ Filters to apply
     , optEmailObfuscation      :: ObfuscationMethod
     , optIdentifierPrefix      :: String
+    , optStripEmptyParagraphs  :: Bool -- ^ Strip empty paragraphs
     , optIndentedCodeClasses   :: [String] -- ^ Default classes for indented code blocks
     , optDataDir               :: Maybe FilePath
     , optCiteMethod            :: CiteMethod -- ^ Method to output cites
@@ -688,9 +651,9 @@ defaultOpts = Opt
     , optWrapText              = WrapAuto
     , optColumns               = 72
     , optFilters               = []
-    , optLuaFilters            = []
     , optEmailObfuscation      = NoObfuscation
     , optIdentifierPrefix      = ""
+    , optStripEmptyParagraphs  = False
     , optIndentedCodeClasses   = []
     , optDataDir               = Nothing
     , optCiteMethod            = Citeproc
@@ -807,6 +770,7 @@ defaultWriterName x =
     ".tei"      -> "tei"
     ".ms"       -> "ms"
     ".roff"     -> "ms"
+    ".pptx"     -> "pptx"
     ['.',y]     | y `elem` ['1'..'9'] -> "man"
     _           -> "html"
 
@@ -814,45 +778,6 @@ defaultWriterName x =
 
 applyTransforms :: Monad m => [Transform] -> Pandoc -> m Pandoc
 applyTransforms transforms d = return $ foldr ($) d transforms
-
-  -- First we check to see if a filter is found.  If not, and if it's
-  -- not an absolute path, we check to see whether it's in `userdir/filters`.
-  -- If not, we leave it unchanged.
-expandFilterPath :: MonadIO m => Maybe FilePath -> FilePath -> m FilePath
-expandFilterPath mbDatadir fp = liftIO $ do
-  fpExists <- doesFileExist fp
-  if fpExists
-     then return fp
-     else case mbDatadir of
-               Just datadir | isRelative fp -> do
-                 let filterPath = datadir </> "filters" </> fp
-                 filterPathExists <- doesFileExist filterPath
-                 if filterPathExists
-                    then return filterPath
-                    else return fp
-               _ -> return fp
-
-applyLuaFilters :: Maybe FilePath -> [FilePath] -> String -> Pandoc
-                -> PandocIO Pandoc
-applyLuaFilters mbDatadir filters format d = do
-  expandedFilters <- mapM (expandFilterPath mbDatadir) filters
-  let go f d' = do
-        res <- runLuaFilter mbDatadir f format d'
-        case res of
-          Right x               -> return x
-          Left (LuaException s) -> E.throw (PandocFilterError f s)
-  foldrM ($) d $ map go expandedFilters
-
-applyFilters :: MonadIO m
-             => ReaderOptions
-             -> Maybe FilePath
-             -> [FilePath]
-             -> [String]
-             -> Pandoc
-             -> m Pandoc
-applyFilters ropts mbDatadir filters args d = do
-  expandedFilters <- mapM (expandFilterPath mbDatadir) filters
-  foldrM ($) d $ map (flip (externalFilter ropts) args) expandedFilters
 
 readSource :: FilePath -> PandocIO Text
 readSource "-" = liftIO (UTF8.toText <$> BS.getContents)
@@ -937,7 +862,15 @@ options =
                   "NUMBER")
                  "" -- "Headers base level"
 
-     , Option "" ["indented-code-classes"]
+    , Option "" ["strip-empty-paragraphs"]
+                 (NoArg
+                  (\opt -> do
+                      deprecatedOption "--stripEmptyParagraphs"
+                        "Use +empty_paragraphs extension."
+                      return opt{ optStripEmptyParagraphs = True }))
+                 "" -- "Strip empty paragraphs"
+
+    , Option "" ["indented-code-classes"]
                   (ReqArg
                    (\arg opt -> return opt { optIndentedCodeClasses = words $
                                              map (\c -> if c == ',' then ' ' else c) arg })
@@ -946,13 +879,15 @@ options =
 
     , Option "F" ["filter"]
                  (ReqArg
-                  (\arg opt -> return opt { optFilters = arg : optFilters opt })
+                  (\arg opt -> return opt { optFilters =
+                                    JSONFilter arg : optFilters opt })
                   "PROGRAM")
                  "" -- "External JSON filter"
 
     , Option "" ["lua-filter"]
                  (ReqArg
-                  (\arg opt -> return opt { optLuaFilters = arg : optLuaFilters opt })
+                  (\arg opt -> return opt { optFilters =
+                                    LuaFilter arg : optFilters opt })
                   "SCRIPTPATH")
                  "" -- "Lua filter"
 
@@ -1047,6 +982,29 @@ options =
                   "FILE")
                   "" -- "Print default data file"
 
+    , Option "" ["print-highlight-style"]
+                 (ReqArg
+                  (\arg _ -> do
+                     sty <- fromMaybe pygments <$>
+                              lookupHighlightStyle (Just arg)
+                     B.putStr $ encodePretty'
+                       defConfig{confIndent = Spaces 4
+                                ,confCompare = keyOrder
+                                  (map T.pack
+                                   ["text-color"
+                                   ,"background-color"
+                                   ,"line-number-color"
+                                   ,"line-number-background-color"
+                                   ,"bold"
+                                   ,"italic"
+                                   ,"underline"
+                                   ,"text-styles"])
+                                ,confNumFormat = Generic
+                                ,confTrailingNewline = True} sty
+                     exitSuccess)
+                  "STYLE|FILE")
+                 "" -- "Print default template for FORMAT"
+
     , Option "" ["dpi"]
                  (ReqArg
                   (\arg opt ->
@@ -1119,7 +1077,7 @@ options =
     , Option "" ["highlight-style"]
                 (ReqArg
                  (\arg opt -> return opt{ optHighlightStyle = Just arg })
-                 "STYLE")
+                 "STYLE|FILE")
                  "" -- "Style for highlighted code"
 
     , Option "" ["syntax-definition"]
@@ -1365,7 +1323,7 @@ options =
                  (ReqArg
                   (\arg opt -> do
                       let oldArgs = optPdfEngineArgs opt
-                      return opt { optPdfEngineArgs = arg : oldArgs })
+                      return opt { optPdfEngineArgs = oldArgs ++ [arg]})
                   "STRING")
                  "" -- "Flags to pass to the PDF-engine, all instances of this option are accumulated and used"
 
@@ -1437,7 +1395,7 @@ options =
     , Option "m" ["latexmathml", "asciimathml"]
                  (OptArg
                   (\arg opt -> do
-                      deprecatedOption "--latexmathml"
+                      deprecatedOption "--latexmathml, --asciimathml, -m" ""
                       return opt { optHTMLMathMethod = LaTeXMathML arg })
                   "URL")
                  "" -- "Use LaTeXMathML script in html output"
@@ -1445,7 +1403,7 @@ options =
     , Option "" ["mimetex"]
                  (OptArg
                   (\arg opt -> do
-                      deprecatedOption "--mimetex"
+                      deprecatedOption "--mimetex" ""
                       let url' = case arg of
                                       Just u  -> u ++ "?"
                                       Nothing -> "/cgi-bin/mimetex.cgi?"
@@ -1456,7 +1414,7 @@ options =
     , Option "" ["jsmath"]
                  (OptArg
                   (\arg opt -> do
-                      deprecatedOption "--jsmath"
+                      deprecatedOption "--jsmath" ""
                       return opt { optHTMLMathMethod = JsMath arg})
                   "URL")
                  "" -- "Use jsMath for HTML math"
@@ -1464,7 +1422,7 @@ options =
     , Option "" ["gladtex"]
                  (NoArg
                   (\opt -> do
-                      deprecatedOption "--gladtex"
+                      deprecatedOption "--gladtex" ""
                       return opt { optHTMLMathMethod = GladTeX }))
                  "" -- "Use gladtex for HTML math"
 
@@ -1544,15 +1502,16 @@ options =
                  ""
 
     , Option "" ["list-extensions"]
-                 (NoArg
-                  (\_ -> do
-                     let showExt x = drop 4 (show x) ++
-                                       if extensionEnabled x pandocExtensions
-                                          then " +"
-                                          else " -"
+                 (OptArg
+                  (\arg _ -> do
+                     let exts = getDefaultExtensions (fromMaybe "markdown" arg)
+                     let showExt x = (if extensionEnabled x exts
+                                         then '+'
+                                         else '-') : drop 4 (show x)
                      mapM_ (UTF8.hPutStrLn stdout . showExt)
                                ([minBound..maxBound] :: [Extension])
-                     exitSuccess ))
+                     exitSuccess )
+                  "FORMAT")
                  ""
 
     , Option "" ["list-highlight-languages"]
@@ -1605,7 +1564,7 @@ usageMessage programName = usageInfo (programName ++ " [OPTIONS] [FILES]")
 copyrightMessage :: String
 copyrightMessage = intercalate "\n" [
   "",
-  "Copyright (C) 2006-2017 John MacFarlane",
+  "Copyright (C) 2006-2018 John MacFarlane",
   "Web:  http://pandoc.org",
   "This is free software; see the source for copying conditions.",
   "There is no warranty, not even for merchantability or fitness",
@@ -1664,9 +1623,9 @@ splitField s =
 baseWriterName :: String -> String
 baseWriterName = takeWhile (\c -> c /= '+' && c /= '-')
 
-deprecatedOption :: String -> IO ()
-deprecatedOption o =
-  runIO (report $ Deprecated o "") >>=
+deprecatedOption :: String -> String -> IO ()
+deprecatedOption o msg =
+  runIO (report $ Deprecated o msg) >>=
     \r -> case r of
        Right () -> return ()
        Left e   -> E.throwIO e

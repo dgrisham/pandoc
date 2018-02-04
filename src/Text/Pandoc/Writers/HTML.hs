@@ -3,7 +3,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE ViewPatterns        #-}
 {-
-Copyright (C) 2006-2017 John MacFarlane <jgm@berkeley.edu>
+Copyright (C) 2006-2018 John MacFarlane <jgm@berkeley.edu>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -22,7 +22,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 {- |
    Module      : Text.Pandoc.Writers.HTML
-   Copyright   : Copyright (C) 2006-2017 John MacFarlane
+   Copyright   : Copyright (C) 2006-2018 John MacFarlane
    License     : GNU GPL, version 2 or above
 
    Maintainer  : John MacFarlane <jgm@berkeley.edu>
@@ -41,7 +41,8 @@ module Text.Pandoc.Writers.HTML (
   writeSlidy,
   writeSlideous,
   writeDZSlides,
-  writeRevealJs
+  writeRevealJs,
+  tagWithAttributes
   ) where
 import Control.Monad.State.Strict
 import Data.Char (ord, toLower)
@@ -55,6 +56,11 @@ import qualified Data.Text.Lazy as TL
 import Network.HTTP (urlEncode)
 import Network.URI (URI (..), parseURIReference, unEscapeString)
 import Numeric (showHex)
+import Text.Blaze.Internal (customLeaf, MarkupM(Empty))
+#if MIN_VERSION_blaze_markup(0,6,3)
+#else
+import Text.Blaze.Internal (preEscapedString, preEscapedText)
+#endif
 import Text.Blaze.Html hiding (contents)
 import Text.Pandoc.Definition
 import Text.Pandoc.Highlighting (formatHtmlBlock, formatHtmlInline, highlight,
@@ -83,7 +89,7 @@ import System.FilePath (takeBaseName, takeExtension)
 import Text.Blaze.Html.Renderer.Text (renderHtml)
 import qualified Text.Blaze.XHtml1.Transitional as H
 import qualified Text.Blaze.XHtml1.Transitional.Attributes as A
-import Text.Pandoc.Class (PandocMonad, report)
+import Text.Pandoc.Class (PandocMonad, report, runPure)
 import Text.Pandoc.Error
 import Text.Pandoc.Logging
 import Text.TeXMath
@@ -422,7 +428,7 @@ elementToHtml slideLevel opts (Sec level num (id',classes,keyvals) title' elemen
                   modify (\st -> st{ stElement = False})
                   return res
 
-  let isSec (Sec{}) = True
+  let isSec Sec{} = True
       isSec (Blk _) = False
   let isPause (Blk x) = x == Para [Str ".",Space,Str ".",Space,Str "."]
       isPause _       = False
@@ -542,6 +548,21 @@ obfuscateChar char =
 obfuscateString :: String -> String
 obfuscateString = concatMap obfuscateChar . fromEntities
 
+-- | Create HTML tag with attributes.
+tagWithAttributes :: WriterOptions
+                  -> Bool -- ^ True for HTML5
+                  -> Bool -- ^ True if self-closing tag
+                  -> Text -- ^ Tag text
+                  -> Attr -- ^ Pandoc style tag attributes
+                  -> Text
+tagWithAttributes opts html5 selfClosing tagname attr =
+  let mktag = (TL.toStrict . renderHtml <$> evalStateT
+               (addAttrs opts attr (customLeaf (textTag tagname) selfClosing))
+               defaultWriterState{ stHtml5 = html5 })
+  in  case runPure mktag of
+           Left _  -> mempty
+           Right t -> t
+
 addAttrs :: PandocMonad m
          => WriterOptions -> Attr -> Html -> StateT WriterState m Html
 addAttrs opts attr h = foldl (!) h <$> attrsToHtml opts attr
@@ -601,7 +622,7 @@ imageExts = [ "art", "bmp", "cdr", "cdt", "cpt", "cr2", "crw", "djvu", "erf",
 
 treatAsImage :: FilePath -> Bool
 treatAsImage fp =
-  let path = fromMaybe fp (uriPath `fmap` parseURIReference fp)
+  let path = maybe fp uriPath (parseURIReference fp)
       ext  = map toLower $ drop 1 $ takeExtension path
   in  null ext || ext `elem` imageExts
 
@@ -641,6 +662,7 @@ blockToHtml opts (Para [Image attr txt (s,'f':'i':'g':':':tit)]) =
   figure opts attr txt (s,tit)
 blockToHtml opts (Para lst)
   | isEmptyRaw lst = return mempty
+  | null lst && not (isEnabled Ext_empty_paragraphs opts) = return mempty
   | otherwise = do
       contents <- inlineListToHtml opts lst
       return $ H.p contents
@@ -652,8 +674,7 @@ blockToHtml opts (LineBlock lns) =
   if writerWrapText opts == WrapNone
   then blockToHtml opts $ linesToPara lns
   else do
-    let lf = preEscapedString "\n"
-    htmlLines <- mconcat . intersperse lf <$> mapM (inlineListToHtml opts) lns
+    htmlLines <- inlineListToHtml opts $ intercalate [LineBreak] lns
     return $ H.div ! A.class_ "line-block" $ htmlLines
 blockToHtml opts (Div attr@(ident, classes, kvs') bs) = do
   html5 <- gets stHtml5
@@ -780,8 +801,8 @@ blockToHtml opts (OrderedList (startnum, numstyle, _) lst) = do
   let numstyle' = case numstyle of
                        Example -> "decimal"
                        _       -> camelCaseToHyphenated $ show numstyle
-  let attribs = ([A.start $ toValue startnum | startnum /= 1]) ++
-                ([A.class_ "example" | numstyle == Example]) ++
+  let attribs = [A.start $ toValue startnum | startnum /= 1] ++
+                [A.class_ "example" | numstyle == Example] ++
                 (if numstyle /= DefaultStyle
                    then if html5
                            then [A.type_ $
@@ -802,7 +823,7 @@ blockToHtml opts (DefinitionList lst) = do
                   do term' <- if null term
                                  then return mempty
                                  else liftM H.dt $ inlineListToHtml opts term
-                     defs' <- mapM (liftM (\x -> H.dd $ (x >> nl opts)) .
+                     defs' <- mapM (liftM (\x -> H.dd (x >> nl opts)) .
                                     blockListToHtml opts) defs
                      return $ mconcat $ nl opts : term' : nl opts :
                                         intersperse (nl opts) defs') lst
@@ -885,8 +906,7 @@ tableItemToHtml opts tag' align' item = do
   let tag'' = if null alignStr
                  then tag'
                  else tag' ! attribs
-  return $ (
-              tag'' contents) >> nl opts
+  return $ tag'' contents >> nl opts
 
 toListItems :: WriterOptions -> [Html] -> [Html]
 toListItems opts items = map (toListItem opts) items ++ [nl opts]
@@ -894,9 +914,13 @@ toListItems opts items = map (toListItem opts) items ++ [nl opts]
 toListItem :: WriterOptions -> Html -> Html
 toListItem opts item = nl opts >> H.li item
 
-blockListToHtml :: PandocMonad m => WriterOptions -> [Block] -> StateT WriterState m Html
+blockListToHtml :: PandocMonad m
+                => WriterOptions -> [Block] -> StateT WriterState m Html
 blockListToHtml opts lst =
-  (mconcat . intersperse (nl opts)) <$> mapM (blockToHtml opts) lst
+  (mconcat . intersperse (nl opts) . filter nonempty)
+    <$> mapM (blockToHtml opts) lst
+  where nonempty (Empty _) = False
+        nonempty _         = True
 
 -- | Convert list of Pandoc inline elements to HTML.
 inlineListToHtml :: PandocMonad m => WriterOptions -> [Inline] -> StateT WriterState m Html
@@ -1130,7 +1154,7 @@ blockListToNote :: PandocMonad m => WriterOptions -> String -> [Block] -> StateT
 blockListToNote opts ref blocks =
   -- If last block is Para or Plain, include the backlink at the end of
   -- that block. Otherwise, insert a new Plain block with the backlink.
-  let backlink = [Link ("",["footnote-back"],[]) [Str "↩"] ("#" ++ writerIdentifierPrefix opts ++ "fnref" ++ ref,[])]
+  let backlink = [Link ("",["footnote-back"],[]) [Str "↩"] ("#" ++ "fnref" ++ ref,[])]
       blocks'  = if null blocks
                     then []
                     else let lastBlock   = last blocks

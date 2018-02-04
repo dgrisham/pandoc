@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-
-Copyright (C) 2015-2017 John MacFarlane <jgm@berkeley.edu>
+Copyright (C) 2015-2018 John MacFarlane <jgm@berkeley.edu>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -19,7 +19,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 {- |
    Module      : Text.Pandoc.Writers.CommonMark
-   Copyright   : Copyright (C) 2015-2017 John MacFarlane
+   Copyright   : Copyright (C) 2015-2018 John MacFarlane
    License     : GNU GPL, version 2 or above
 
    Maintainer  : John MacFarlane <jgm@berkeley.edu>
@@ -39,13 +39,14 @@ import Data.List (transpose)
 import Data.Monoid (Any (..), (<>))
 import Data.Text (Text)
 import qualified Data.Text as T
+import Network.HTTP (urlEncode)
 import Text.Pandoc.Class (PandocMonad)
 import Text.Pandoc.Definition
 import Text.Pandoc.Options
 import Text.Pandoc.Shared (isTightList, linesToPara, substitute)
 import Text.Pandoc.Templates (renderTemplate')
 import Text.Pandoc.Walk (query, walk, walkM)
-import Text.Pandoc.Writers.HTML (writeHtml5String)
+import Text.Pandoc.Writers.HTML (writeHtml5String, tagWithAttributes)
 import Text.Pandoc.Writers.Shared
 
 -- | Convert Pandoc to CommonMark.
@@ -117,9 +118,12 @@ blockToNodes _ (CodeBlock (_,[],_) xs) ns = return
   (node (CODE_BLOCK (T.pack (" ")) (T.pack xs)) [] : ns)
 blockToNodes _ (CodeBlock (_,classes,_) xs) ns = return
   (node (CODE_BLOCK (T.pack (unwords classes)) (T.pack xs)) [] : ns)
-blockToNodes _ (RawBlock fmt xs) ns
-  | fmt == Format "html" = return (node (HTML_BLOCK (T.pack xs)) [] : ns)
-  | otherwise = return (node (CUSTOM_BLOCK (T.pack xs) T.empty) [] : ns)
+blockToNodes opts (RawBlock fmt xs) ns
+  | fmt == Format "html" && isEnabled Ext_raw_html opts
+              = return (node (HTML_BLOCK (T.pack xs)) [] : ns)
+  | fmt == Format "latex" || fmt == Format "tex" && isEnabled Ext_raw_tex opts
+              = return (node (CUSTOM_BLOCK (T.pack xs) T.empty) [] : ns)
+  | otherwise = return ns
 blockToNodes opts (BlockQuote bs) ns = do
   nodes <- blocksToNodes opts bs
   return (node BLOCK_QUOTE nodes : ns)
@@ -143,9 +147,13 @@ blockToNodes opts (OrderedList (start, _sty, delim) items) ns = do
 blockToNodes _ HorizontalRule ns = return (node THEMATIC_BREAK [] : ns)
 blockToNodes opts (Header lev _ ils) ns =
   return (node (HEADING lev) (inlinesToNodes opts ils) : ns)
-blockToNodes opts (Div _ bs) ns = do
+blockToNodes opts (Div attr bs) ns = do
   nodes <- blocksToNodes opts bs
-  return (nodes ++ ns)
+  let op = tagWithAttributes opts True False "div" attr
+  if isEnabled Ext_raw_html opts
+     then return (node (HTML_BLOCK op) [] : nodes ++
+                  [node (HTML_BLOCK (T.pack "</div>")) []] ++ ns)
+     else return (nodes ++ ns)
 blockToNodes opts (DefinitionList items) ns =
   blockToNodes opts (BulletList items') ns
   where items' = map dlToBullet items
@@ -271,9 +279,12 @@ inlineToNodes opts (Image alt ils (url,'f':'i':'g':':':tit)) =
   inlineToNodes opts (Image alt ils (url,tit))
 inlineToNodes opts (Image _ ils (url,tit)) =
   (node (IMAGE (T.pack url) (T.pack tit)) (inlinesToNodes opts ils) :)
-inlineToNodes _ (RawInline fmt xs)
-  | fmt == Format "html" = (node (HTML_INLINE (T.pack xs)) [] :)
-  | otherwise = (node (CUSTOM_INLINE (T.pack xs) T.empty) [] :)
+inlineToNodes opts (RawInline fmt xs)
+  | fmt == Format "html" && isEnabled Ext_raw_html opts
+              = (node (HTML_INLINE (T.pack xs)) [] :)
+  | (fmt == Format "latex" || fmt == Format "tex") && isEnabled Ext_raw_tex opts
+              = (node (CUSTOM_INLINE (T.pack xs) T.empty) [] :)
+  | otherwise = id
 inlineToNodes opts (Quoted qt ils) =
   ((node (TEXT start) [] :
    inlinesToNodes opts ils ++ [node (TEXT end) []]) ++)
@@ -285,13 +296,28 @@ inlineToNodes opts (Quoted qt ils) =
                             | isEnabled Ext_smart opts -> ("\"", "\"")
                             | otherwise -> ("“", "”")
 inlineToNodes _ (Code _ str) = (node (CODE (T.pack str)) [] :)
-inlineToNodes _ (Math mt str) =
-  case mt of
-    InlineMath  ->
-      (node (HTML_INLINE (T.pack ("\\(" ++ str ++ "\\)"))) [] :)
-    DisplayMath ->
-      (node (HTML_INLINE (T.pack ("\\[" ++ str ++ "\\]"))) [] :)
-inlineToNodes opts (Span _ ils) = (inlinesToNodes opts ils ++)
+inlineToNodes opts (Math mt str) =
+  case writerHTMLMathMethod opts of
+       WebTeX url ->
+           let core = inlineToNodes opts
+                        (Image nullAttr [Str str] (url ++ urlEncode str, str))
+               sep = if mt == DisplayMath
+                        then (node LINEBREAK [] :)
+                        else id
+           in  (sep . core . sep)
+       _  ->
+           case mt of
+            InlineMath  ->
+              (node (HTML_INLINE (T.pack ("\\(" ++ str ++ "\\)"))) [] :)
+            DisplayMath ->
+              (node (HTML_INLINE (T.pack ("\\[" ++ str ++ "\\]"))) [] :)
+inlineToNodes opts (Span attr ils) =
+  let nodes = inlinesToNodes opts ils
+      op = tagWithAttributes opts True False "span" attr
+  in  if isEnabled Ext_raw_html opts
+         then ((node (HTML_INLINE op) [] : nodes ++
+                [node (HTML_INLINE (T.pack "</span>")) []]) ++)
+         else (nodes ++)
 inlineToNodes opts (Cite _ ils) = (inlinesToNodes opts ils ++)
 inlineToNodes _ (Note _) = id -- should not occur
 -- we remove Note elements in preprocessing

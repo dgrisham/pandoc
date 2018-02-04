@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-
-Copyright (C) 2006-2017 John MacFarlane <jgm@berkeley.edu>
+Copyright (C) 2006-2018 John MacFarlane <jgm@berkeley.edu>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -19,7 +19,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 {- |
    Module      : Text.Pandoc.Writers.RST
-   Copyright   : Copyright (C) 2006-2017 John MacFarlane
+   Copyright   : Copyright (C) 2006-2018 John MacFarlane
    License     : GNU GPL, version 2 or above
 
    Maintainer  : John MacFarlane <jgm@berkeley.edu>
@@ -57,7 +57,6 @@ data WriterState =
               , stHasRawTeX   :: Bool
               , stOptions     :: WriterOptions
               , stTopLevel    :: Bool
-              , stLastNested  :: Bool
               }
 
 type RST = StateT WriterState
@@ -68,7 +67,7 @@ writeRST opts document = do
   let st = WriterState { stNotes = [], stLinks = [],
                          stImages = [], stHasMath = False,
                          stHasRawTeX = False, stOptions = opts,
-                         stTopLevel = True, stLastNested = False}
+                         stTopLevel = True }
   evalStateT (pandocToRST document) st
 
 -- | Return RST representation of document.
@@ -133,7 +132,7 @@ keyToRST (label, (src, _)) = do
 -- | Return RST representation of notes.
 notesToRST :: PandocMonad m => [[Block]] -> RST m Doc
 notesToRST notes =
-  mapM (uncurry noteToRST) (zip [1..] notes) >>=
+   zipWithM noteToRST [1..] notes >>=
   return . vsep
 
 -- | Return RST representation of a note.
@@ -250,7 +249,7 @@ blockToRST (Header level (name,classes,_) inlines) = do
           let headerChar = if level > 5 then ' ' else "=-~^'" !! (level - 1)
           let border = text $ replicate (offset contents) headerChar
           let anchor | null name || name == autoId = empty
-                     | otherwise = ".. " <> text name <> ":" $$ blankline
+                     | otherwise = ".. _" <> text name <> ":" $$ blankline
           return $ nowrap $ anchor $$ contents $$ border $$ blankline
     else do
           let rub     = "rubric:: " <> contents
@@ -307,8 +306,7 @@ blockToRST (OrderedList (start, style', delim) items) = do
   let maxMarkerLength = maximum $ map length markers
   let markers' = map (\m -> let s = maxMarkerLength - length m
                             in  m ++ replicate s ' ') markers
-  contents <- mapM (uncurry orderedListItemToRST) $
-              zip markers' items
+  contents <- zipWithM orderedListItemToRST markers' items
   -- ensure that sublists have preceding blank line
   return $ blankline $$ chomp (vcat contents) $$ blankline
 blockToRST (DefinitionList items) = do
@@ -353,32 +351,25 @@ blockListToRST' :: PandocMonad m
                 -> [Block]       -- ^ List of block elements
                 -> RST m Doc
 blockListToRST' topLevel blocks = do
+  -- insert comment between list and quoted blocks, see #4248 and #3675
+  let fixBlocks (b1:b2@(BlockQuote _):bs)
+        | toClose b1 = b1 : commentSep : b2 : fixBlocks bs
+        where
+          toClose Plain{}                                = False
+          toClose Header{}                               = False
+          toClose LineBlock{}                            = False
+          toClose HorizontalRule                         = False
+          toClose (Para [Image _ _ (_,'f':'i':'g':':':_)]) = True
+          toClose Para{}                                 = False
+          toClose _                                        = True
+          commentSep  = RawBlock "rst" "..\n\n"
+      fixBlocks (b:bs) = b : fixBlocks bs
+      fixBlocks [] = []
   tl <- gets stTopLevel
-  modify (\s->s{stTopLevel=topLevel, stLastNested=False})
-  res <- vcat `fmap` mapM blockToRST' blocks
+  modify (\s->s{stTopLevel=topLevel})
+  res <- vcat `fmap` mapM blockToRST (fixBlocks blocks)
   modify (\s->s{stTopLevel=tl})
   return res
-
-blockToRST' :: PandocMonad m => Block -> RST m Doc
-blockToRST' (x@BlockQuote{}) = do
-  lastNested <- gets stLastNested
-  res <- blockToRST x
-  modify (\s -> s{stLastNested = True})
-  return $ if lastNested
-              then ".." $+$ res
-              else res
-blockToRST' x = do
-  modify (\s -> s{stLastNested =
-    case x of
-         Para [Image _ _ (_,'f':'i':'g':':':_)] -> True
-         Para{}                                 -> False
-         Plain{}                                -> False
-         Header{}                               -> False
-         LineBlock{}                            -> False
-         HorizontalRule                         -> False
-         _                                      -> True
-    })
-  blockToRST x
 
 blockListToRST :: PandocMonad m
                => [Block]       -- ^ List of block elements

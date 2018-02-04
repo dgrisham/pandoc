@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-
-Copyright (C) 2007-2017 John MacFarlane <jgm@berkeley.edu>
+Copyright (C) 2007-2018 John MacFarlane <jgm@berkeley.edu>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -19,7 +19,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 {- |
    Module      : Text.Pandoc.Writers.Man
-   Copyright   : Copyright (C) 2007-2017 John MacFarlane
+   Copyright   : Copyright (C) 2007-2018 John MacFarlane
    License     : GNU GPL, version 2 or above
 
    Maintainer  : John MacFarlane <jgm@berkeley.edu>
@@ -114,7 +114,7 @@ notesToMan :: PandocMonad m => WriterOptions -> [[Block]] -> StateT WriterState 
 notesToMan opts notes =
   if null notes
      then return empty
-     else mapM (uncurry (noteToMan opts)) (zip [1..] notes) >>=
+     else zipWithM (noteToMan opts) [1..] notes >>=
           return . (text ".SH NOTES" $$) . vcat
 
 -- | Return man representation of a note.
@@ -373,6 +373,8 @@ inlineToMan _ LineBreak = return $
   cr <> text ".PD 0" $$ text ".P" $$ text ".PD" <> cr
 inlineToMan _ SoftBreak = return space
 inlineToMan _ Space = return space
+inlineToMan opts (Link _ txt ('#':_, _)) =
+  inlineListToMan opts txt -- skip internal links
 inlineToMan opts (Link _ txt (src, _)) = do
   linktext <- inlineListToMan opts txt
   let srcSuffix = fromMaybe src (stripPrefix "mailto:" src)

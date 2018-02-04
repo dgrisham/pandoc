@@ -6,7 +6,7 @@
 {-# LANGUAGE ScopedTypeVariables   #-}
 {-# LANGUAGE ViewPatterns          #-}
 {-
-Copyright (C) 2006-2017 John MacFarlane <jgm@berkeley.edu>
+Copyright (C) 2006-2018 John MacFarlane <jgm@berkeley.edu>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -25,7 +25,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 {- |
    Module      : Text.Pandoc.Shared
-   Copyright   : Copyright (C) 2006-2017 John MacFarlane
+   Copyright   : Copyright (C) 2006-2018 John MacFarlane
    License     : GNU GPL, version 2 or above
 
    Maintainer  : John MacFarlane <jgm@berkeley.edu>
@@ -72,6 +72,7 @@ module Text.Pandoc.Shared (
                      inlineListToIdentifier,
                      isHeaderBlock,
                      headerShift,
+                     stripEmptyParagraphs,
                      isTightList,
                      addMetaField,
                      makeMeta,
@@ -90,6 +91,7 @@ module Text.Pandoc.Shared (
                      mapLeft,
                      -- * for squashing blocks
                      blocksToInlines,
+                     blocksToInlines',
                      -- * Safe read
                      safeRead,
                      -- * Temp directory
@@ -106,7 +108,7 @@ import qualified Data.ByteString.Lazy as BL
 import Data.Char (isAlpha, isDigit, isLetter, isLower, isSpace, isUpper,
                   toLower)
 import Data.Data (Data, Typeable)
-import Data.List (find, intercalate, stripPrefix)
+import Data.List (find, intercalate, intersperse, stripPrefix)
 import qualified Data.Map as M
 import Data.Maybe (mapMaybe)
 import Data.Monoid ((<>))
@@ -291,7 +293,7 @@ normalizeDate s = fmap (formatTime defaultTimeLocale "%F")
              parseTime defaultTimeLocale
 #endif
         formats = ["%x","%m/%d/%Y", "%D","%F", "%d %b %Y",
-                    "%d %B %Y", "%b. %d, %Y", "%B %d, %Y",
+                    "%e %B %Y", "%b. %e, %Y", "%B %e, %Y",
                     "%Y%m%d", "%Y%m", "%Y"]
 
 --
@@ -492,7 +494,7 @@ hierarchicalizeWithIds (Header level attr@(_,classes,_) title':xs) = do
   return $ Sec level newnum attr title' sectionContents' : rest'
 hierarchicalizeWithIds (Div ("",["references"],[])
                          (Header level (ident,classes,kvs) title' : xs):ys) =
-  hierarchicalizeWithIds (Header level (ident,("references":classes),kvs)
+  hierarchicalizeWithIds (Header level (ident,"references":classes,kvs)
                            title' : (xs ++ ys))
 hierarchicalizeWithIds (x:rest) = do
   rest' <- hierarchicalizeWithIds rest
@@ -528,6 +530,14 @@ headerShift n = walk shift
   where shift :: Block -> Block
         shift (Header level attr inner) = Header (level + n) attr inner
         shift x                         = x
+
+-- | Remove empty paragraphs.
+stripEmptyParagraphs :: Pandoc -> Pandoc
+stripEmptyParagraphs = walk go
+  where go :: [Block] -> [Block]
+        go = filter (not . isEmptyParagraph)
+        isEmptyParagraph (Para []) = True
+        isEmptyParagraph _         = False
 
 -- | Detect if a list is tight.
 isTightList :: [[Block]] -> Bool
@@ -708,37 +718,40 @@ isURI = maybe False hasKnownScheme . parseURI
 --- Squash blocks into inlines
 ---
 
-blockToInlines :: Block -> [Inline]
-blockToInlines (Plain ils) = ils
-blockToInlines (Para ils) = ils
-blockToInlines (LineBlock lns) = combineLines lns
-blockToInlines (CodeBlock attr str) = [Code attr str]
-blockToInlines (RawBlock fmt str) = [RawInline fmt str]
-blockToInlines (BlockQuote blks) = blocksToInlines blks
+blockToInlines :: Block -> Inlines
+blockToInlines (Plain ils) = B.fromList ils
+blockToInlines (Para ils) = B.fromList ils
+blockToInlines (LineBlock lns) = B.fromList $ combineLines lns
+blockToInlines (CodeBlock attr str) = B.codeWith attr str
+blockToInlines (RawBlock (Format fmt) str) = B.rawInline fmt str
+blockToInlines (BlockQuote blks) = blocksToInlines' blks
 blockToInlines (OrderedList _ blkslst) =
-  concatMap blocksToInlines blkslst
+  mconcat $ map blocksToInlines' blkslst
 blockToInlines (BulletList blkslst) =
-  concatMap blocksToInlines blkslst
+  mconcat $ map blocksToInlines' blkslst
 blockToInlines (DefinitionList pairslst) =
-  concatMap f pairslst
+  mconcat $ map f pairslst
   where
-    f (ils, blkslst) = ils ++
-      [Str ":", Space] ++
-      concatMap blocksToInlines blkslst
-blockToInlines (Header _ _  ils) = ils
-blockToInlines HorizontalRule = []
+    f (ils, blkslst) = B.fromList ils <> B.str ":" <> B.space <>
+      mconcat (map blocksToInlines' blkslst)
+blockToInlines (Header _ _  ils) = B.fromList ils
+blockToInlines HorizontalRule = mempty
 blockToInlines (Table _ _ _ headers rows) =
-  intercalate [LineBreak] $ map (concatMap blocksToInlines) tbl
-  where
-    tbl = headers : rows
-blockToInlines (Div _ blks) = blocksToInlines blks
-blockToInlines Null = []
+  mconcat $ intersperse B.linebreak $
+    map (mconcat . map blocksToInlines') (headers:rows)
+blockToInlines (Div _ blks) = blocksToInlines' blks
+blockToInlines Null = mempty
 
-blocksToInlinesWithSep :: [Inline] -> [Block] -> [Inline]
-blocksToInlinesWithSep sep blks = intercalate sep $ map blockToInlines blks
+blocksToInlinesWithSep :: Inlines -> [Block] -> Inlines
+blocksToInlinesWithSep sep =
+  mconcat . intersperse sep . map blockToInlines
+
+blocksToInlines' :: [Block] -> Inlines
+blocksToInlines' = blocksToInlinesWithSep parSep
+  where parSep = B.space <> B.str "¶" <> B.space
 
 blocksToInlines :: [Block] -> [Inline]
-blocksToInlines = blocksToInlinesWithSep [Space, Str "¶", Space]
+blocksToInlines = B.toList . blocksToInlines'
 
 
 --

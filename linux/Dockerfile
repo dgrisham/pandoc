@@ -12,9 +12,28 @@ RUN stack config set system-ghc --global true
 #RUN echo "build: { split-objs: true }" > /etc/stack/config.yaml
 RUN mkdir -p /usr/src/
 WORKDIR /usr/src/
-RUN git clone https://github.com/jgm/pandoc
+RUN git  clone https://github.com/jgm/pandoc
 WORKDIR /usr/src/pandoc
-RUN stack install --stack-yaml stack.pkg.yaml --only-dependencies \
+RUN stack install --stack-yaml stack.lts9.yaml \
+    --only-dependencies \
+    --flag 'pandoc:static' \
+    --flag 'pandoc:embed_data_files' \
+    --flag 'pandoc-citeproc:static' \
+    --flag 'pandoc-citeproc:embed_data_files' \
+    --flag 'hslua:-export-dynamic' \
+    --ghc-options '-O2 -optc-Os -optl=-pthread -optl=-static -fPIC' \
+    aeson
+RUN stack install --stack-yaml stack.lts9.yaml \
+    --only-dependencies \
+    --flag 'pandoc:static' \
+    --flag 'pandoc:embed_data_files' \
+    --flag 'pandoc-citeproc:static' \
+    --flag 'pandoc-citeproc:embed_data_files' \
+    --flag 'hslua:-export-dynamic' \
+    --ghc-options '-O2 -optc-Os -optl=-pthread -optl=-static -fPIC' \
+    http-client-tls
+RUN stack install --stack-yaml stack.lts9.yaml \
+    --only-dependencies \
     --flag 'pandoc:static' \
     --flag 'pandoc:embed_data_files' \
     --flag 'pandoc-citeproc:static' \
@@ -24,7 +43,7 @@ RUN stack install --stack-yaml stack.pkg.yaml --only-dependencies \
     pandoc pandoc-citeproc
 CMD git pull && \
     git checkout -b work $TREE && \
-    stack install --stack-yaml stack.pkg.yaml \
+    stack install --stack-yaml stack.lts9.yaml \
       --flag 'pandoc:static' \
       --flag 'pandoc:embed_data_files' \
       --flag 'pandoc-citeproc:static' \

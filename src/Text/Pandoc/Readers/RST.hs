@@ -2,7 +2,7 @@
 {-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-
-Copyright (C) 2006-2017 John MacFarlane <jgm@berkeley.edu>
+Copyright (C) 2006-2018 John MacFarlane <jgm@berkeley.edu>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -21,7 +21,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 {- |
    Module      : Text.Pandoc.Readers.RST
-   Copyright   : Copyright (C) 2006-2017 John MacFarlane
+   Copyright   : Copyright (C) 2006-2018 John MacFarlane
    License     : GNU GPL, version 2 or above
 
    Maintainer  : John MacFarlane <jgm@berkeley.edu>
@@ -352,7 +352,7 @@ singleHeader' :: PandocMonad m => RSTParser m (Inlines, Char)
 singleHeader' = try $ do
   notFollowedBy' whitespace
   lookAhead $ anyLine >> oneOf underlineChars
-  txt <- trimInlines . mconcat <$> many1 (do {notFollowedBy newline; inline})
+  txt <- trimInlines . mconcat <$> many1 (notFollowedBy blankline >> inline)
   pos <- getPosition
   let len = sourceColumn pos - 1
   blankline
@@ -547,7 +547,7 @@ bulletListStart :: Monad m => ParserT [Char] st m Int
 bulletListStart = try $ do
   notFollowedBy' hrule  -- because hrules start out just like lists
   marker <- oneOf bulletListMarkers
-  white <- many1 spaceChar
+  white <- many1 spaceChar <|> "" <$ lookAhead (char '\n')
   return $ length (marker:white)
 
 -- parses ordered list start and returns its length (inc following whitespace)
@@ -556,7 +556,7 @@ orderedListStart :: Monad m => ListNumberStyle
                  -> RSTParser m Int
 orderedListStart style delim = try $ do
   (_, markerLen) <- withHorizDisplacement (orderedListMarker style delim)
-  white <- many1 spaceChar
+  white <- many1 spaceChar <|> "" <$ lookAhead (char '\n')
   return $ markerLen + length white
 
 -- parse a line of a list item
@@ -972,11 +972,16 @@ extractCaption = do
   legend <- optional blanklines >> (mconcat <$> many block)
   return (capt,legend)
 
--- divide string by blanklines
+-- divide string by blanklines, and surround with
+-- \begin{aligned}...\end{aligned} if needed.
 toChunks :: String -> [String]
 toChunks = dropWhile null
-           . map (trim . unlines)
+           . map (addAligned . trim . unlines)
            . splitBy (all (`elem` (" \t" :: String))) . lines
+  -- we put this in an aligned environment if it contains \\, see #4254
+  where addAligned s = if "\\\\" `isInfixOf` s
+                          then "\\begin{aligned}\n" ++ s ++ "\n\\end{aligned}"
+                          else s
 
 codeblock :: [String] -> Maybe String -> String -> String -> RSTParser m Blocks
 codeblock classes numberLines lang body =
@@ -1030,7 +1035,7 @@ noteBlock' marker = try $ do
 citationMarker :: Monad m => RSTParser m [Char]
 citationMarker = do
   char '['
-  res <- simpleReferenceName'
+  res <- simpleReferenceName
   char ']'
   return res
 
@@ -1039,7 +1044,7 @@ noteMarker = do
   char '['
   res <- many1 digit
       <|>
-                  try (char '#' >> liftM ('#':) simpleReferenceName')
+                  try (char '#' >> liftM ('#':) simpleReferenceName)
       <|> count 1 (oneOf "#*")
   char ']'
   return res
@@ -1048,34 +1053,24 @@ noteMarker = do
 -- reference key
 --
 
-quotedReferenceName :: PandocMonad m => RSTParser m Inlines
+quotedReferenceName :: PandocMonad m => RSTParser m String
 quotedReferenceName = try $ do
   char '`' >> notFollowedBy (char '`') -- `` means inline code!
-  trimInlines . mconcat <$> many1Till inline (char '`')
-
-unquotedReferenceName :: PandocMonad m => RSTParser m Inlines
-unquotedReferenceName = try $ do -- `` means inline code!
-  trimInlines . mconcat <$> many1Till inline (lookAhead $ char ':')
+  manyTill anyChar (char '`')
 
 -- Simple reference names are single words consisting of alphanumerics
 -- plus isolated (no two adjacent) internal hyphens, underscores,
 -- periods, colons and plus signs; no whitespace or other characters
 -- are allowed.
-simpleReferenceName' :: Monad m => ParserT [Char] st m String
-simpleReferenceName' = do
+simpleReferenceName :: Monad m => ParserT [Char] st m String
+simpleReferenceName = do
   x <- alphaNum
   xs <- many $  alphaNum
-            <|>
-                  try (oneOf "-_:+." <* lookAhead alphaNum)
+            <|> try (oneOf "-_:+." <* lookAhead alphaNum)
   return (x:xs)
 
-simpleReferenceName :: Monad m => ParserT [Char] st m Inlines
-simpleReferenceName = B.str <$> simpleReferenceName'
-
-referenceName :: PandocMonad m => RSTParser m Inlines
-referenceName = quotedReferenceName <|>
-                try (simpleReferenceName <* lookAhead (char ':')) <|>
-                unquotedReferenceName
+referenceName :: PandocMonad m => RSTParser m String
+referenceName = quotedReferenceName <|> simpleReferenceName
 
 referenceKey :: PandocMonad m => RSTParser m [Char]
 referenceKey = do
@@ -1123,16 +1118,17 @@ anonymousKey = try $ do
   updateState $ \s -> s { stateKeys = M.insert key ((src,""), nullAttr) $
                           stateKeys s }
 
-stripTicks :: String -> String
-stripTicks = reverse . stripTick . reverse . stripTick
-  where stripTick ('`':xs) = xs
-        stripTick xs       = xs
-
 referenceNames :: PandocMonad m => RSTParser m [String]
 referenceNames = do
   let rn = try $ do
              string ".. _"
-             (_, ref) <- withRaw referenceName
+             ref <- quotedReferenceName
+                  <|> many (  noneOf ":\n"
+                          <|> try (char '\n' <*
+                                   string "   " <*
+                                   notFollowedBy blankline)
+                          <|> try (char ':' <* lookAhead alphaNum)
+                           )
              char ':'
              return ref
   first <- rn
@@ -1147,16 +1143,15 @@ regularKey = try $ do
   refs <- referenceNames
   src <- targetURI
   guard $ not (null src)
-  let keys = map (toKey . stripTicks) refs
+  let keys = map toKey refs
   forM_ keys $ \key ->
     updateState $ \s -> s { stateKeys = M.insert key ((src,""), nullAttr) $
                             stateKeys s }
 
 anchorDef :: PandocMonad m => RSTParser m [Char]
 anchorDef = try $ do
-  (refs, raw) <- withRaw (try (referenceNames <* blanklines))
-  let keys = map stripTicks refs
-  forM_ keys $ \rawkey ->
+  (refs, raw) <- withRaw $ try (referenceNames <* blanklines)
+  forM_ refs $ \rawkey ->
     updateState $ \s -> s { stateKeys =
        M.insert (toKey rawkey) (('#':rawkey,""), nullAttr) $ stateKeys s }
   -- keep this for 2nd round of parsing, where we'll add the divs (anchor)
@@ -1167,9 +1162,19 @@ anchor = try $ do
   refs <- referenceNames
   blanklines
   b <- block
-  -- put identifier on next block:
   let addDiv ref = B.divWith (ref, [], [])
-  return $ foldr addDiv b refs
+  let emptySpanWithId id' = Span (id',[],[]) []
+  -- put identifier on next block:
+  case B.toList b of
+       [Header lev (_,classes,kvs) txt] ->
+         case reverse refs of
+              [] -> return b
+              (r:rs) -> return $ B.singleton $
+                           Header lev (r,classes,kvs)
+                             (txt ++ map emptySpanWithId rs)
+                -- we avoid generating divs for headers,
+                -- because it hides them from promoteHeader, see #4240
+       _ -> return $ foldr addDiv b refs
 
 headerBlock :: PandocMonad m => RSTParser m [Char]
 headerBlock = do
@@ -1258,7 +1263,7 @@ simpleTableHeader headless = try $ do
   let rawHeads = if headless
                     then replicate (length dashes) ""
                     else simpleTableSplitLine indices rawContent
-  heads <- mapM ( (parseFromString' (mconcat <$> many plain)) . trim) rawHeads
+  heads <- mapM ( parseFromString' (mconcat <$> many plain) . trim) rawHeads
   return (heads, aligns, indices)
 
 -- Parse a simple table.
@@ -1409,7 +1414,7 @@ renderRole contents fmt role attr = case role of
            pepUrl = "http://www.python.org/dev/peps/pep-" ++ padNo ++ "/"
 
 addClass :: String -> Attr -> Attr
-addClass c (ident, classes, keyValues) = (ident, union classes [c], keyValues)
+addClass c (ident, classes, keyValues) = (ident, classes `union` [c], keyValues)
 
 roleName :: PandocMonad m => RSTParser m String
 roleName = many1 (letter <|> char '-')
@@ -1449,7 +1454,7 @@ endline = try $ do
   notFollowedBy blankline
   -- parse potential list-starts at beginning of line differently in a list:
   st <- getState
-  when ((stateParserContext st) == ListItemState) $ notFollowedBy (anyOrderedListMarker >> spaceChar) >>
+  when (stateParserContext st == ListItemState) $ notFollowedBy (anyOrderedListMarker >> spaceChar) >>
           notFollowedBy' bulletListStart
   return B.softbreak
 
@@ -1479,22 +1484,20 @@ explicitLink = try $ do
                           _      -> return ((src, ""), nullAttr)
   return $ B.linkWith attr (escapeURI src') tit label''
 
-citationName :: PandocMonad m => RSTParser m Inlines
+citationName :: PandocMonad m => RSTParser m String
 citationName = do
   raw <- citationMarker
-  return $ B.str $ "[" ++ raw ++ "]"
+  return $ "[" ++ raw ++ "]"
 
 referenceLink :: PandocMonad m => RSTParser m Inlines
 referenceLink = try $ do
-  (label',ref) <- withRaw (quotedReferenceName
-                          <|> simpleReferenceName
-                          <|> citationName) <*
-                   char '_'
+  ref <- (referenceName <|> citationName) <* char '_'
+  let label' = B.text ref
   let isAnonKey (Key ('_':_)) = True
       isAnonKey _             = False
   state <- getState
   let keyTable = stateKeys state
-  key <- option (toKey $ stripTicks ref) $
+  key <- option (toKey ref) $
                 do char '_'
                    let anonKeys = sort $ filter isAnonKey $ M.keys keyTable
                    case anonKeys of
@@ -1574,7 +1577,7 @@ note = try $ do
       -- not yet in this implementation.
       updateState $ \st -> st{ stateNotes = [] }
       contents <- parseFromString' parseBlocks raw
-      let newnotes = if (ref == "*" || ref == "#") -- auto-numbered
+      let newnotes = if ref == "*" || ref == "#" -- auto-numbered
                         -- delete the note so the next auto-numbered note
                         -- doesn't get the same contents:
                         then deleteFirstsBy (==) notes [(ref,raw)]

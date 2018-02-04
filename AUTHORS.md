@@ -63,6 +63,7 @@
 - Greg Rundlett
 - Grégory Bataille
 - Gwern Branwen
+- Hamish Mackenzie
 - Hans-Peter Deifel
 - Henrik Tramberend
 - Henry de Valence
@@ -146,6 +147,7 @@
 - RyanGlScott
 - Sascha Wilde
 - Scott Morrison
+- Sebastian Talmon
 - Sergei Trofimovich
 - Sergey Astanin
 - Shahbaz Youssefi
@@ -183,6 +185,7 @@
 - infinity0x
 - lwolfsonkin
 - nkalvi
+- oltolm
 - qerub
 - robabla
 - roblabla

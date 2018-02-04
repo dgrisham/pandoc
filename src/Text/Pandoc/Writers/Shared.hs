@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-
-Copyright (C) 2013-2017 John MacFarlane <jgm@berkeley.edu>
+Copyright (C) 2013-2018 John MacFarlane <jgm@berkeley.edu>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -19,7 +19,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 {- |
    Module      : Text.Pandoc.Writers.Shared
-   Copyright   : Copyright (C) 2013-2017 John MacFarlane
+   Copyright   : Copyright (C) 2013-2018 John MacFarlane
    License     : GNU GPL, version 2 or above
 
    Maintainer  : John MacFarlane <jgm@berkeley.edu>
@@ -40,6 +40,7 @@ module Text.Pandoc.Writers.Shared (
                      , fixDisplayMath
                      , unsmartify
                      , gridTable
+                     , metaValueToInlines
                      )
 where
 import Control.Monad (zipWithM)
@@ -55,6 +56,7 @@ import qualified Text.Pandoc.Builder as Builder
 import Text.Pandoc.Definition
 import Text.Pandoc.Options
 import Text.Pandoc.Pretty
+import Text.Pandoc.Walk (query)
 import Text.Pandoc.UTF8 (toStringLazy)
 import Text.Pandoc.XML (escapeStringForXML)
 
@@ -196,13 +198,19 @@ fixDisplayMath :: Block -> Block
 fixDisplayMath (Plain lst)
   | any isDisplayMath lst && not (all isDisplayMath lst) =
     -- chop into several paragraphs so each displaymath is its own
-    Div ("",["math"],[]) $ map (Plain . stripLeadingTrailingSpace) $
+    Div ("",["math"],[]) $
+       map Plain $
+       filter (not . null) $
+       map stripLeadingTrailingSpace $
        groupBy (\x y -> (isDisplayMath x && isDisplayMath y) ||
                          not (isDisplayMath x || isDisplayMath y)) lst
 fixDisplayMath (Para lst)
   | any isDisplayMath lst && not (all isDisplayMath lst) =
     -- chop into several paragraphs so each displaymath is its own
-    Div ("",["math"],[]) $ map (Para . stripLeadingTrailingSpace) $
+    Div ("",["math"],[]) $
+       map Para $
+       filter (not . null) $
+       map stripLeadingTrailingSpace $
        groupBy (\x y -> (isDisplayMath x && isDisplayMath y) ||
                          not (isDisplayMath x || isDisplayMath y)) lst
 fixDisplayMath x = x
@@ -302,3 +310,10 @@ gridTable opts blocksToDoc headless aligns widths headers rows = do
            head'' $$
            body $$
            border '-' (repeat AlignDefault) widthsInChars
+
+metaValueToInlines :: MetaValue -> [Inline]
+metaValueToInlines (MetaString s)    = [Str s]
+metaValueToInlines (MetaInlines ils) = ils
+metaValueToInlines (MetaBlocks bs)   = query return bs
+metaValueToInlines (MetaBool b)      = [Str $ show b]
+metaValueToInlines _                 = []

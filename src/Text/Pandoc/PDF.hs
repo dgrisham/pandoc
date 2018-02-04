@@ -2,7 +2,7 @@
 {-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-
-Copyright (C) 2012-2017 John MacFarlane <jgm@berkeley.edu>
+Copyright (C) 2012-2018 John MacFarlane <jgm@berkeley.edu>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -21,7 +21,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 {- |
    Module      : Text.Pandoc.PDF
-   Copyright   : Copyright (C) 2012-2017 John MacFarlane
+   Copyright   : Copyright (C) 2012-2018 John MacFarlane
    License     : GNU GPL, version 2 or above
 
    Maintainer  : John MacFarlane <jgm@berkeley.edu>
@@ -104,6 +104,10 @@ makePDF "wkhtmltopdf" pdfargs writer opts doc@(Pandoc meta _) = do
                             (getField "margin-right" meta'))
                  ,("margin-left", fromMaybe (Just "1.25in")
                             (getField "margin-left" meta'))
+                 ,("footer-html", fromMaybe Nothing
+                            (getField "footer-html" meta'))
+                 ,("header-html", fromMaybe Nothing
+                            (getField "header-html" meta'))
                  ]
   source <- writer opts doc
   verbosity <- getVerbosity

@@ -1,5 +1,5 @@
 {-
-Copyright (C) 2007-2017 John MacFarlane <jgm@berkeley.edu>
+Copyright (C) 2007-2018 John MacFarlane <jgm@berkeley.edu>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -18,7 +18,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 {- |
    Module      : Text.Pandoc.Writers.Ms
-   Copyright   : Copyright (C) 2007-2017 John MacFarlane
+   Copyright   : Copyright (C) 2007-2018 John MacFarlane
    License     : GNU GPL, version 2 or above
 
    Maintainer  : John MacFarlane <jgm@berkeley.edu>
@@ -586,7 +586,7 @@ styleToMs sty = vcat $ colordefs ++ map (toMacro sty) alltoktypes
         allcolors = catMaybes $ ordNub $
           [defaultColor sty, backgroundColor sty,
            lineNumberColor sty, lineNumberBackgroundColor sty] ++
-           concatMap (colorsForToken. snd) (tokenStyles sty)
+           concatMap (colorsForToken. snd) (Map.toList (tokenStyles sty))
         colorsForToken ts = [tokenColor ts, tokenBackground ts]
 
 hexColor :: Color -> String
@@ -611,7 +611,7 @@ toMacro sty toktype =
         resetfont = if tokBold || tokItalic
                        then text "\\\\f[C]"
                        else empty
-        tokSty = lookup toktype (tokenStyles sty)
+        tokSty = Map.lookup toktype (tokenStyles sty)
         tokCol = (tokSty >>= tokenColor) `mplus` defaultColor sty
         -- tokBg  = (tokSty >>= tokenBackground) `mplus` backgroundColor sty
         tokBold = fromMaybe False (tokenBold <$> tokSty)

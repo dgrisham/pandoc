@@ -2,7 +2,7 @@
 {-# LANGUAGE PatternGuards       #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-
-Copyright (C) 2006-2017 John MacFarlane <jgm@berkeley.edu>
+Copyright (C) 2006-2018 John MacFarlane <jgm@berkeley.edu>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -21,7 +21,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 {- |
    Module      : Text.Pandoc.Writers.LaTeX
-   Copyright   : Copyright (C) 2006-2017 John MacFarlane
+   Copyright   : Copyright (C) 2006-2018 John MacFarlane
    License     : GNU GPL, version 2 or above
 
    Maintainer  : John MacFarlane <jgm@berkeley.edu>
@@ -41,7 +41,7 @@ import Data.Char (isAlphaNum, isAscii, isDigit, isLetter, isPunctuation, ord,
                   toLower)
 import Data.List (foldl', intercalate, intersperse, isInfixOf, nubBy,
                   stripPrefix, (\\))
-import Data.Maybe (catMaybes, fromMaybe, isJust, mapMaybe)
+import Data.Maybe (catMaybes, fromMaybe, isJust, mapMaybe, isNothing)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Network.URI (unEscapeString)
@@ -253,8 +253,10 @@ pandocToLaTeX options (Pandoc meta blocks) = do
                   defField "section-titles" True $
                   defField "geometry" geometryFromMargins $
                   (case getField "papersize" metadata of
-                        Just ("A4" :: String) -> resetField "papersize"
-                                                    ("a4" :: String)
+                        -- uppercase a4, a5, etc.
+                        Just (('A':d:ds) :: String)
+                          | all isDigit (d:ds) -> resetField "papersize"
+                                                    (('a':d:ds) :: String)
                         _                     -> id)
                   metadata
   let context' =
@@ -274,10 +276,13 @@ pandocToLaTeX options (Pandoc meta blocks) = do
                     "\\AddBabelHook{" ++ poly ++ "}{afterextras}" ++
                       "{\\renewcommand{\\text" ++ poly ++ "}[2][]{\\foreignlanguage{"
                       ++ poly ++ "}{##2}}}\n"
-               else "\\newcommand{\\text" ++ poly ++ "}[2][]{\\foreignlanguage{"
-                      ++ babel ++ "}{#2}}\n" ++
-                    "\\newenvironment{" ++ poly ++ "}[2][]{\\begin{otherlanguage}{"
-                      ++ babel ++ "}}{\\end{otherlanguage}}\n"
+               else (if poly == "latin" -- see #4161
+                        then "\\providecommand{\\textlatin}{}\n\\renewcommand"
+                        else "\\newcommand") ++ "{\\text" ++ poly ++
+                    "}[2][]{\\foreignlanguage{" ++ babel ++ "}{#2}}\n" ++
+                    "\\newenvironment{" ++ poly ++
+                    "}[2][]{\\begin{otherlanguage}{" ++
+                    babel ++ "}}{\\end{otherlanguage}}\n"
             )
             -- eliminate duplicates that have same polyglossia name
             $ nubBy (\a b -> fst a == fst b)
@@ -393,10 +398,10 @@ elementToBeamer slideLevel  (Sec lvl _num (ident,classes,kvs) tit elts)
           hasCode _          = []
       let fragile = "fragile" `elem` classes ||
                     not (null $ query hasCodeBlock elts ++ query hasCode elts)
-      let frameoptions = ["allowdisplaybreaks", "allowframebreaks",
+      let frameoptions = ["allowdisplaybreaks", "allowframebreaks", "fragile",
                           "b", "c", "t", "environment",
                           "label", "plain", "shrink", "standout"]
-      let optionslist = ["fragile" | fragile] ++
+      let optionslist = ["fragile" | fragile && isNothing (lookup "fragile" kvs)] ++
                         [k | k <- classes, k `elem` frameoptions] ++
                         [k ++ "=" ++ v | (k,v) <- kvs, k `elem` frameoptions]
       let options = if null optionslist
@@ -694,10 +699,9 @@ blockToLaTeX (Table caption aligns widths heads rows) = do
                   then return empty
                   else ($$ text "\\endfirsthead") <$> toHeaders heads
   head' <- if all null heads
-              then return empty
+              then return "\\toprule"
               -- avoid duplicate notes in head and firsthead:
-              else ($$ text "\\endhead") <$>
-                   toHeaders (if isEmpty firsthead
+              else toHeaders (if isEmpty firsthead
                                  then heads
                                  else walk removeNote heads)
   let capt = if isEmpty captionText
@@ -712,8 +716,8 @@ blockToLaTeX (Table caption aligns widths heads rows) = do
               -- the @{} removes extra space at beginning and end
          $$ capt
          $$ firsthead
-         $$ (if all null heads then "\\toprule" else empty)
          $$ head'
+         $$ "\\endhead"
          $$ vcat rows'
          $$ "\\bottomrule"
          $$ "\\end{longtable}"
@@ -745,9 +749,9 @@ tableRowToLaTeX header aligns widths cols = do
       isSimple []        = True
       isSimple _         = False
   -- simple tables have to have simple cells:
-  let widths' = if not (all isSimple cols)
+  let widths' = if all (== 0) widths && not (all isSimple cols)
                    then replicate (length aligns)
-                          (0.97 / fromIntegral (length aligns))
+                          (scaleFactor / fromIntegral (length aligns))
                    else map (scaleFactor *) widths
   cells <- mapM (tableCellToLaTeX header) $ zip3 widths' aligns cols
   return $ hsep (intersperse "&" cells) <> "\\tabularnewline"
@@ -815,7 +819,7 @@ listItemToLaTeX lst
   -- we need to put some text before a header if it's the first
   -- element in an item. This will look ugly in LaTeX regardless, but
   -- this will keep the typesetter from throwing an error.
-  | (Header _ _ _ :_) <- lst =
+  | (Header{} :_) <- lst =
     blockListToLaTeX lst >>= return . (text "\\item ~" $$) . nest 2
   | otherwise = blockListToLaTeX lst >>= return .  (text "\\item" $$) .
                       nest 2
@@ -852,7 +856,7 @@ sectionHeader unnumbered ident level lst = do
   plain <- stringToLaTeX TextString $ concatMap stringify lst
   let removeInvalidInline (Note _)             = []
       removeInvalidInline (Span (id', _, _) _) | not (null id') = []
-      removeInvalidInline (Image{})            = []
+      removeInvalidInline Image{}            = []
       removeInvalidInline x                    = [x]
   let lstNoNotes = foldr (mappend . (\x -> walkM removeInvalidInline x)) mempty lst
   txtNoNotes <- inlineListToLaTeX lstNoNotes
@@ -1011,7 +1015,7 @@ inlineToLaTeX (Code (_,classes,_) str) = do
         let chr = case "!\"&'()*,-./:;?@_" \\ str of
                        (c:_) -> c
                        []    -> '!'
-        let str' = escapeStringUsing (backslashEscapes "\\{}%") str
+        let str' = escapeStringUsing (backslashEscapes "\\{}%~_&") str
         -- we always put lstinline in a dummy 'passthrough' command
         -- (defined in the default template) so that we don't have
         -- to change the way we escape characters depending on whether
@@ -1122,7 +1126,12 @@ inlineToLaTeX (Image attr _ (source, _)) = do
                          Just dim         ->
                            [d <> text (show dim)]
                          Nothing          ->
-                           []
+                           case dir of
+                                Width | isJust (dimension Height attr) ->
+                                  [d <> "\\textwidth"]
+                                Height | isJust (dimension Width attr) ->
+                                  [d <> "\\textheight"]
+                                _ -> []
       dimList = showDim Width ++ showDim Height
       dims = if null dimList
                 then empty

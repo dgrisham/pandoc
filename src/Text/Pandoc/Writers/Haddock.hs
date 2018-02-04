@@ -2,7 +2,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TupleSections       #-}
 {-
-Copyright (C) 2014-2015, 2017 John MacFarlane <jgm@berkeley.edu>
+Copyright (C) 2014-2015, 2017-2018 John MacFarlane <jgm@berkeley.edu>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -168,8 +168,7 @@ blockToHaddock opts (OrderedList (start,_,delim) items) = do
   let markers' = map (\m -> if length m < 3
                                then m ++ replicate (3 - length m) ' '
                                else m) markers
-  contents <- mapM (uncurry (orderedListItemToHaddock opts)) $
-              zip markers' items
+  contents <- zipWithM (orderedListItemToHaddock opts) markers' items
   return $ cat contents <> blankline
 blockToHaddock opts (DefinitionList items) = do
   contents <- mapM (definitionListItemToHaddock opts) items

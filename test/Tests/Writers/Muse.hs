@@ -94,6 +94,15 @@ tests = [ testGroup "block elements"
                                               , " second definition :: second description"
                                               , " third definition :: third description"
                                               ]
+              , "definition list with multiple descriptions" =:
+                definitionList [ (text "first definition", [plain $ text "first description"
+                                                           ,plain $ text "second description"])
+                               , (text "second definition", [plain $ text "third description"])
+                               ]
+                =?> unlines [ " first definition :: first description"
+                            , "                  :: second description"
+                            , " second definition :: third description"
+                            ]
               ]
             -- Test that lists of the same type and style are separated with two blanklines
             , testGroup "sequential lists"
@@ -197,8 +206,8 @@ tests = [ testGroup "block elements"
                                                   ]
               , "nested definition lists" =: definitionList [ (text "first definition", [plain $ text "first description"])
                                                             , (text "second definition",
-                                                               [ plain (text "second description")
-                                                               , definitionList [ ( text "first inner definition"
+                                                               [ plain (text "second description") <>
+                                                                 definitionList [ ( text "first inner definition"
                                                                                   , [plain $ text "first inner description"])
                                                                                 , ( text "second inner definition"
                                                                                   , [plain $ text "second inner description"])
@@ -234,9 +243,15 @@ tests = [ testGroup "block elements"
                       , ""
                       , "*** Third level"
                       ]
+            , "heading with ID" =:
+               headerWith ("bar", [], []) 2 (text "Foo") =?>
+               unlines [ "** Foo"
+                       , "#bar"
+                      ]
             ]
           , "horizontal rule" =: horizontalRule =?> "----"
           , "escape horizontal rule" =: para (text "----") =?> "<verbatim>----</verbatim>"
+          , "escape nonbreaking space" =: para (text "~~") =?> "<verbatim>~~</verbatim>"
           , testGroup "tables"
             [ "table without header" =:
               let rows = [[para $ text "Para 1.1", para $ text "Para 1.2"]
@@ -268,7 +283,9 @@ tests = [ testGroup "block elements"
                           , " |+ Table 1 +|"
                           ]
             ]
-          -- Div is trivial
+          , "div with bullet list" =:
+            divWith nullAttr (bulletList [para $ text "foo"]) =?>
+            unlines [ " - foo" ] -- Making sure bullets are indented
           -- Null is trivial
           ]
         , testGroup "inline elements"
@@ -300,6 +317,7 @@ tests = [ testGroup "block elements"
           , testGroup "code"
             [ "simple" =: code "foo" =?> "<code>foo</code>"
             , "escape tag" =: code "<code>foo = bar</code> baz" =?> "<code><code>foo = bar<</code><code>/code> baz</code>"
+            , "normalization with attributes" =: codeWith ("",["haskell"],[]) "foo" <> code "bar" =?> "<code>foobar</code>"
             , "normalization" =: code "</co" <> code "de>" =?> "<code><</code><code>/code></code>"
             ]
           , testGroup "spaces"
@@ -312,7 +330,7 @@ tests = [ testGroup "block elements"
             ]
           , testGroup "math"
             [ "inline math" =: math "2^3" =?> "2<sup>3</sup>"
-            , "display math" =: displayMath "2^3" =?> "<verse>2<sup>3</sup></verse>"
+            , "display math" =: displayMath "2^3" =?> "2<sup>3</sup>"
             , "multiple letters in inline math" =: math "abc" =?> "<em>abc</em>"
             ]
           , "raw inline"
@@ -333,6 +351,9 @@ tests = [ testGroup "block elements"
                                                   =?> "[[URL:1.png]]"
             ]
           , "image" =: image "image.png" "Image 1" (str "") =?> "[[image.png][Image 1]]"
+          , "image with width" =:
+            imageWith ("", [], [("width", "60%")]) "image.png" "Image" (str "") =?>
+            "[[image.png 60][Image]]"
           , "note" =: note (plain (text "Foo"))
                    =?> unlines [ "[1]"
                                , ""

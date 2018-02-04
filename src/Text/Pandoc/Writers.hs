@@ -1,5 +1,5 @@
 {-
-Copyright (C) 2006-2017 John MacFarlane <jgm@berkeley.edu>
+Copyright (C) 2006-2018 John MacFarlane <jgm@berkeley.edu>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -21,7 +21,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 {- |
    Module      : Text.Pandoc
-   Copyright   : Copyright (C) 2006-2017 John MacFarlane
+   Copyright   : Copyright (C) 2006-2018 John MacFarlane
    License     : GNU GPL, version 2 or above
 
    Maintainer  : John MacFarlane <jgm@berkeley.edu>
@@ -68,6 +68,7 @@ module Text.Pandoc.Writers
     , writeOpenDocument
     , writeOrg
     , writePlain
+    , writePowerpoint
     , writeRST
     , writeRTF
     , writeRevealJs
@@ -113,6 +114,7 @@ import Text.Pandoc.Writers.ODT
 import Text.Pandoc.Writers.OpenDocument
 import Text.Pandoc.Writers.OPML
 import Text.Pandoc.Writers.Org
+import Text.Pandoc.Writers.Powerpoint
 import Text.Pandoc.Writers.RST
 import Text.Pandoc.Writers.RTF
 import Text.Pandoc.Writers.TEI
@@ -131,6 +133,7 @@ writers = [
   ,("json"         , TextWriter $ \o d -> return $ writeJSON o d)
   ,("docx"         , ByteStringWriter writeDocx)
   ,("odt"          , ByteStringWriter writeODT)
+  ,("pptx"         , ByteStringWriter writePowerpoint)
   ,("epub"         , ByteStringWriter writeEPUB3)
   ,("epub2"        , ByteStringWriter writeEPUB2)
   ,("epub3"        , ByteStringWriter writeEPUB3)

@@ -14,15 +14,18 @@ packages:
 - '.'
 extra-deps:
 - pandoc-types-1.17.3
-- hslua-0.9.2
+- hslua-0.9.5
 - hslua-module-text-0.1.2
-- skylighting-0.4.4
-- texmath-0.10
+- skylighting-0.6
+- ansi-terminal-0.7.1.1
+- texmath-0.10.1.1
 - cmark-gfm-0.1.1
 - QuickCheck-2.10.0.1
 - tasty-quickcheck-0.9.1
-- hs-bibutils-6.2.0.1
 - doctemplates-0.2.1
 - haddock-library-1.4.3
-- pandoc-citeproc-0.12.1
-resolver: lts-9.9
+- tagsoup-0.14.2
+- hs-bibutils-6.2.0.1
+- pandoc-citeproc-0.14.1.2
+- tagsoup-0.14.3
+resolver: lts-9.14

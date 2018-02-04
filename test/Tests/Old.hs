@@ -79,6 +79,8 @@ tests = [ testGroup "markdown"
           ]
         , testGroup "jats"
           [ testGroup "writer" $ writerTests "jats"
+          , test "reader" ["-r", "jats", "-w", "native", "-s"]
+            "jats-reader.xml" "jats-reader.native"
           ]
         , testGroup "native"
           [ testGroup "writer" $ writerTests "native"
@@ -159,6 +161,12 @@ tests = [ testGroup "markdown"
         , testGroup "creole"
           [ test "reader" ["-r", "creole", "-w", "native", "-s"]
             "creole-reader.txt" "creole-reader.native"
+          ]
+        , testGroup "custom writer"
+          [ test "basic" ["-f", "native", "-t", "../data/sample.lua"]
+            "testsuite.native" "writer.custom"
+          , test "tables" ["-f", "native", "-t", "../data/sample.lua"]
+            "tables.native" "tables.custom"
           ]
         ]
 

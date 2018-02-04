@@ -3,7 +3,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TupleSections       #-}
 {-
-Copyright (C) 2006-2017 John MacFarlane <jgm@berkeley.edu>
+Copyright (C) 2006-2018 John MacFarlane <jgm@berkeley.edu>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -22,7 +22,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 {- |
    Module      : Text.Pandoc.Writers.Markdown
-   Copyright   : Copyright (C) 2006-2017 John MacFarlane
+   Copyright   : Copyright (C) 2006-2018 John MacFarlane
    License     : GNU GPL, version 2 or above
 
    Maintainer  : John MacFarlane <jgm@berkeley.edu>
@@ -306,22 +306,24 @@ escapeString opts (c:cs) =
        _ -> c : escapeString opts cs
 
 -- | Construct table of contents from list of header blocks.
-tableOfContents :: PandocMonad m => WriterOptions -> [Block] -> m Doc
-tableOfContents opts headers =
-  let contents = BulletList $ map (elementToListItem opts) $ hierarchicalize headers
-  in  evalMD (blockToMarkdown opts contents) def def
+tableOfContents :: PandocMonad m => WriterOptions -> [Block] -> MD m Doc
+tableOfContents opts headers = do
+  contents <- BulletList <$> mapM (elementToListItem opts) (hierarchicalize headers)
+  blockToMarkdown opts contents
 
 -- | Converts an Element to a list item for a table of contents,
-elementToListItem :: WriterOptions -> Element -> [Block]
+elementToListItem :: PandocMonad m => WriterOptions -> Element -> MD m [Block]
 elementToListItem opts (Sec lev _nums (ident,_,_) headerText subsecs)
-  = Plain headerLink :
-    [ BulletList (map (elementToListItem opts) subsecs) |
-      not (null subsecs) && lev < writerTOCDepth opts ]
-   where headerLink = if null ident
+  = do isPlain <- asks envPlain
+       let headerLink = if null ident || isPlain
                          then walk deNote headerText
                          else [Link nullAttr (walk deNote headerText)
                                  ('#':ident, "")]
-elementToListItem _ (Blk _) = []
+       listContents <- if null subsecs || lev >= writerTOCDepth opts
+                          then return []
+                          else mapM (elementToListItem opts) subsecs
+       return [Plain headerLink, BulletList listContents]
+elementToListItem _ (Blk _) = return []
 
 attrsToMarkdown :: Attr -> Doc
 attrsToMarkdown attribs = braces $ hsep [attribId, attribClasses, attribKeys]
@@ -701,7 +703,7 @@ pandocTable opts multiline headless aligns widths rawHeaders rawRows = do
   let columns = transpose (rawHeaders : rawRows)
   -- minimal column width without wrapping a single word
   let relWidth w col =
-         max (floor $ fromIntegral (writerColumns opts) * w)
+         max (floor $ fromIntegral (writerColumns opts - 1) * w)
              (if writerWrapText opts == WrapAuto
                  then minNumChars col
                  else numChars col)
@@ -1070,9 +1072,8 @@ inlineToMarkdown opts (Str str) = do
   return $ text str'
 inlineToMarkdown opts (Math InlineMath str) =
   case writerHTMLMathMethod opts of
-       WebTeX url ->
-             inlineToMarkdown opts (Image nullAttr [Str str]
-                 (url ++ urlEncode str, str))
+       WebTeX url -> inlineToMarkdown opts
+                       (Image nullAttr [Str str] (url ++ urlEncode str, str))
        _ | isEnabled Ext_tex_math_dollars opts ->
              return $ "$" <> text str <> "$"
          | isEnabled Ext_tex_math_single_backslash opts ->
