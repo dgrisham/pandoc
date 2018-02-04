@@ -286,6 +286,7 @@ escapeString opts (c:cs) =
        '>' | isEnabled Ext_all_symbols_escapable opts ->
               '\\' : '>' : escapeString opts cs
            | otherwise -> "&gt;" ++ escapeString opts cs
+       --_ | c `elem` ['\\','`','*','_','[',']'] ->
        _ | c `elem` ['\\','`','*','_','[',']','#'] ->
               '\\':c:escapeString opts cs
        '|' | isEnabled Ext_pipe_tables opts -> '\\':'|':escapeString opts cs
@@ -528,7 +529,8 @@ blockToMarkdown' opts (CodeBlock attribs str) = return $
           backticks <> attrs <> cr <> text str <> cr <> backticks <> blankline
            | isEnabled Ext_fenced_code_blocks opts ->
           tildes <> attrs <> cr <> text str <> cr <> tildes <> blankline
-     _ -> nest (writerTabStop opts) (text str) <> blankline
+     _ -> backticks <> cr <> text str <> cr <> backticks <> blankline
+     --_ -> nest (writerTabStop opts) (text str) <> blankline
    where tildes    = text $ case [ln | ln <- lines str, all (=='~') ln] of
                                [] -> "~~~~"
                                xs -> case maximum $ map length xs of

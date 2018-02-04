@@ -86,9 +86,14 @@ blocksToCommonMark opts bs = do
                  then Just $ writerColumns opts
                  else Nothing
   nodes <- blocksToNodes opts bs
-  return $ T.stripEnd $
+  return $ T.stripEnd $ fixCodeBlocks $
     nodeToCommonmark cmarkOpts colwidth $
     node DOCUMENT nodes
+
+-- remove extra spaces from start of codeblocks w/ no attributes introduced by
+-- blockToNodes
+fixCodeBlocks :: Text -> Text
+fixCodeBlocks = T.replace (T.pack "\n```  \n") (T.pack "\n```\n")
 
 inlinesToCommonMark :: PandocMonad m => WriterOptions -> [Inline] -> m Text
 inlinesToCommonMark opts ils = return $
@@ -108,6 +113,8 @@ blockToNodes opts (Plain xs) ns =
 blockToNodes opts (Para xs) ns =
   return (node PARAGRAPH (inlinesToNodes opts xs) : ns)
 blockToNodes opts (LineBlock lns) ns = blockToNodes opts (linesToPara lns) ns
+blockToNodes _ (CodeBlock (_,[],_) xs) ns = return
+  (node (CODE_BLOCK (T.pack (" ")) (T.pack xs)) [] : ns)
 blockToNodes _ (CodeBlock (_,classes,_) xs) ns = return
   (node (CODE_BLOCK (T.pack (unwords classes)) (T.pack xs)) [] : ns)
 blockToNodes _ (RawBlock fmt xs) ns
@@ -255,6 +262,8 @@ inlineToNodes opts (SmallCaps xs) =
   ((node (HTML_INLINE (T.pack "<span class=\"smallcaps\">")) []
     : inlinesToNodes opts xs ++
     [node (HTML_INLINE (T.pack "</span>")) []]) ++ )
+--inlineToNodes _ (Link _ _ (url,_)) =
+  --(node (TEXT (T.pack url)) [] :)
 inlineToNodes opts (Link _ ils (url,tit)) =
   (node (LINK (T.pack url) (T.pack tit)) (inlinesToNodes opts ils) :)
 -- title beginning with fig: indicates implicit figure
